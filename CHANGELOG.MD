@@ -2,7 +2,7 @@
 
 All notable changes to Total IP Control are documented here.
 
-## [1.0.0] — Unreleased
+## [1.0.0] — 2026-06-22
 
 ### Added
 
