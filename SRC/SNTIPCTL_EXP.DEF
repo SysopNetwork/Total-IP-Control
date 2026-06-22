@@ -1,0 +1,6 @@
+; SNTIPCTL_EXP.DEF
+LIBRARY SNTIPCTL.DLL
+; Total IP Control - Copyright (c) 2026 Sysop Network
+; *** Visual Studio EXPORT ALIASES ONLY ***
+EXPORTS
+    _init__sntipctl=init__sntipctl    @1

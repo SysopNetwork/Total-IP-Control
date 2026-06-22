@@ -1,0 +1,132 @@
+
+LEVEL6 {Total IP Control}
+
+
+CLIMIT {[0m[1;31m
+  Connection Limit Exceeded -- Too many simultaneous connections from your IP.
+
+  You have reached the maximum number of connections allowed from your
+  IP address.  Please try again later.
+
+  User(s) from your IP already connected: [1;33m%s[1;31m
+[0m
+} T Connection limit exceeded message
+
+
+CFGHED {[0m[2J[H[1;37mTotal IP Control v1.0.0[0m - Online Configuration
+[0;36m------------------------------------------------------[0m
+} T Config editor header
+
+
+CFGMNU {[0m
+  [36m--- Edit Settings ---
+  [1m1. [0mGeneral Settings
+  [1;36m2. [0mTrusted Proxy IP/CIDRs
+  [1;36m3. [0mConnection Limit Whitelist
+  [36m-------------------------------
+  [1;37mX. [0mExit
+
+  Selection:} T Config top-level menu
+
+
+CFGSAV {[0m[1;32m
+  Settings saved to SNTIPCTL.DAT.
+  Changes take effect immediately and survive BBS restart.
+[0m
+} T Config saved message
+
+
+CFGDNY {[0m
+  [1;31mAccess denied.  Sysop-level access is required.
+
+} T Access denied message
+
+
+CFGBAD {[0m[1;31m
+  Invalid input.  Please try again.
+[0m
+} T Invalid input message
+
+
+IPGDNY {[0m[1;31m
+  IP connection limit reached.  Only %d simultaneous connection(s) from
+  your IP address are allowed in this area.  Please try again later.
+
+  User(s) from your IP currently in this area: [1;33m%s[1;31m
+[0m
+} T Gateway IP limit denial message
+
+
+IPGGNT {} T Gateway access granted message (leave blank for no message)
+
+
+LEVEL99 {Total IP Control FSE form templates -- do not modify field markers}
+
+
+GEN {[0m
+  [1;37mTotal IP Control[0m - General Settings
+  [0;36m--------------------------------------------------[0m
+
+  Trusted proxy enforcement ......... [1;33m???[0m
+  Require trusted proxy (block direct) [1;33m???[0m
+  Global connection limit ........... [1;33m???[0m
+  Max connections per IP ............ [1;33m$$$$[0m
+  Audit logging ..................... [1;33m???[0m
+  User profile IP recording ......... [1;33m???[0m
+  Profile field for recorded IP ..... [1;33m$$[0m
+    [0;36m1=Address1  2=Address2  3=Address3  4=Address4  5=Phone[0m
+  Bypass key ........................ [1;33m???????????????[0m
+
+  [0;36m--------------------------------------------------[0m
+  Action: [1;37m????[0m
+  [1;31m!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!![0m
+} T General settings FSE form
+
+
+PRX {[0m
+  [1mTotal IP Control [0m- Trusted Proxy CIDRs
+  [36m--------------------------------------------------
+
+  [37mEnter IP or CIDR notation (e.g. 10.0.0.1 or 10.0.0.0/24).
+  Leave a slot blank to clear it.
+
+  Trusted proxy IP/CIDR #1........... [1;33m???????????????????
+  [0mTrusted proxy IP/CIDR #2........... [1;33m???????????????????
+
+  [0;36m--------------------------------------------------
+  [37mAction: [1m????
+  [31m!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+} T Trusted proxy CIDR FSE form
+
+
+WL {[0m
+  [1;37mTotal IP Control[0m - Connection Limit Whitelist
+  [0;36m--------------------------------------------------[0m
+
+  Enter IP or CIDR notation (e.g. 192.168.1.0/24) or blank to clear.
+
+  Whitelist #1 ...................... [1;33m???????????????????[0m
+  Whitelist #2 ...................... [1;33m???????????????????[0m
+  Whitelist #3 ...................... [1;33m???????????????????[0m
+  Whitelist #4 ...................... [1;33m???????????????????[0m
+  Whitelist #5 ...................... [1;33m???????????????????[0m
+  Whitelist #6 ...................... [1;33m???????????????????[0m
+  Whitelist #7 ...................... [1;33m???????????????????[0m
+  Whitelist #8 ...................... [1;33m???????????????????[0m
+  Whitelist #9 ...................... [1;33m???????????????????[0m
+  Whitelist #10 ..................... [1;33m???????????????????[0m
+
+  [0;36m--------------------------------------------------[0m
+  Action: [1;37m????[0m
+  [1;31m!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!![0m
+} T Connection limit whitelist FSE form
+
+
+PRXBLK {[0m[1;31m
+  Connection Refused -- This system only accepts connections relayed
+  through an authorized proxy.  Direct connections are not permitted.
+
+  If you believe you are reaching this in error, contact the Sysop.
+[0m
+} T Require-trusted-proxy block message
+
