@@ -41,7 +41,8 @@ limiting) — into a single, unified IP management system.
 - `/J` — `char` is unsigned by default
 - `/MT` (Release) / `/MTd` (Debug) — static CRT
 
-**Required libraries:** `wgserver_lib.lib`, `galgsbl_lib.lib`, `ws2_32.lib`.
+**Required libraries:** `wgserver_lib.lib`, `galgsbl_lib.lib`, `ws2_32.lib`,
+`winhttp.lib` (the last provides the HTTP client for GeoIP lookups).
 `galtcpip_lib.lib` is intentionally not linked; `_tcpipinf` is resolved at
 runtime via `GetProcAddress` to avoid an ordinal-mismatch load failure.
 
@@ -71,7 +72,11 @@ MBBS v10 modules are single- or minimal-file C implementations compiled as
 3. **Proxy protocol support and audit logging** — restore real caller IPs from
    a reverse proxy; daily, thread-safe log files under
    `TOTALIPCONTROL\` with timestamp, username, IP, and event.
-4. **Live online configuration** — all settings editable while the BBS is
+4. **GeoIP location** — resolve each caller's City / State / Country from their
+   IP at login and store it in a configurable profile field. Lookups run on a
+   background worker thread with per-IP caching; a failed lookup never delays or
+   blocks a login. Built around a provider abstraction (default: ipwho.is).
+5. **Live online configuration** — all settings editable while the BBS is
    running.
 
 ### Design priorities (in order)

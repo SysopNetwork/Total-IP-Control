@@ -28,6 +28,8 @@
  */
 #include <winsock2.h>
 #include <windows.h>
+#include <winhttp.h>        /* outbound HTTPS/HTTP for GeoIP lookups          */
+#include <process.h>        /* _beginthreadex for the GeoIP worker thread    */
 
 #include "gcomm.h"
 #include "majorbbs.h"
@@ -39,7 +41,10 @@
 #include "dfaapi.h"
 #include "fsdbbs.h"
 
-#define SNTIPCTL_VERSION "v1.0.0"
+/* Link the WinHTTP client library (also listed in the .vcxproj for clarity). */
+#pragma comment(lib, "winhttp.lib")
+
+#define SNTIPCTL_VERSION "v1.1.0"
 
 /* ======================================================================== */
 /*   Proxy detection state                                                   */
@@ -143,6 +148,30 @@ static CHAR bypass_key[16];
  * subject to the global per-IP connection limit. */
 static struct snt_cidr whitelist_cidrs[SNTIPCTL_MAX_WHITELIST];
 
+/*
+ * GeoIP Location -- at logon, look up the caller's approximate City / State /
+ * Country from their IP via an online provider and store it in a configurable
+ * user profile field.  Lookups run on a background worker thread so login is
+ * never delayed, and a failed lookup can never block a user from logging in.
+ * See the "GeoIP Location" section further down for the full implementation.
+ */
+static GBOOL geoip_enabled   = FALSE;
+static INT   geoip_field     = 3;     /* city/state field: 1=usrad1..4=usrad4, 5=usrpho (default Address 3) */
+static GBOOL geoip_split     = TRUE;  /* TRUE=city/state in geoip_field, country in geoip_cty_field */
+static INT   geoip_cty_field = 4;     /* country field in split mode (default Address 4) */
+static INT   geoip_cty_fmt   = GEOCF_FULL; /* country rendering: full name or 2-letter code */
+static INT   geoip_provider  = GEOPRV_IPWHOIS;
+static GBOOL geoip_use_https = TRUE;
+static INT   geoip_timeout   = 5;     /* seconds per WinHTTP leg               */
+static GBOOL geoip_cache_on     = TRUE;  /* caching enabled at all                */
+static GBOOL geoip_cache_bytime = TRUE;  /* TRUE=expire by duration; FALSE=per-IP */
+static INT   geoip_cache_min = 1440;  /* cache TTL in minutes (24h default)    */
+static INT   geoip_retries   = 1;     /* extra attempts after the first failure*/
+static INT   geoip_loglevel  = GEOLOG_NORMAL;
+static CHAR  geoip_host[64];          /* API host, e.g. "ipwho.is"            */
+static CHAR  geoip_key[80];           /* API key/token, empty = keyless        */
+static CHAR  geoip_format[48];        /* location template, e.g. "{city}, {region}, {country}" */
+
 /* Online config editor -- module state number assigned at init. */
 static INT cfgstt = -1;
 
@@ -183,6 +212,36 @@ static CHAR wl1_fmt[] =
     "WL6=%s%c" "WL7=%s%c" "WL8=%s%c" "WL9=%s%c" "WL10=%s%c";
 
 /*
+ * GeoIP Location form field specification.  PROVIDER is a MULTICHOICE listing
+ * the available providers; only ipwho.is is implemented in v1.1.0, so it is
+ * the sole choice for now.  Adding a provider = add an ALT here (and a case in
+ * geo_build_url()/geo_parse_body()).  LOGLVL maps 0..3 to OFF/ERRORS/NORMAL/
+ * VERBOSE.  Field ordering must match the GEO_* #defines in SNTIPCTL.H.
+ */
+static CHAR geo_fsp[] =
+    "ENABLE(ALT=NO ALT=YES MULTICHOICE) "
+    "WRITEMODE(ALT=COMBINED ALT=SPLIT MULTICHOICE) "
+    "FIELD(MIN=1 MAX=5) "
+    "CTYFLD(MIN=1 MAX=5) "
+    "CTYFMT(ALT=FULL ALT=CODE MULTICHOICE) "
+    "PROVIDER(ALT=IPWHO.IS ALT=IP-API.COM ALT=IPAPI.CO MULTICHOICE) "
+    "HOST "
+    "KEY "
+    "HTTPS(ALT=YES ALT=NO MULTICHOICE) "
+    "TIMEOUT(MIN=1 MAX=60) "
+    "CACHE(ALT=OFF ALT=TIME ALT=IP MULTICHOICE) "
+    "CACHEDUR(MIN=1 MAX=44640) "
+    "RETRY(MIN=0 MAX=5) "
+    "LOGLVL(ALT=OFF ALT=ERRORS ALT=NORMAL ALT=VERBOSE MULTICHOICE) "
+    "FORMAT "
+    "DONE(ALT=SAVE ALT=QUIT MULTICHOICE)";
+
+static CHAR geo_fmt[] =
+    "ENABLE=%s%c" "WRITEMODE=%s%c" "FIELD=%d%c" "CTYFLD=%d%c" "CTYFMT=%s%c"
+    "PROVIDER=%s%c" "HOST=%s%c" "KEY=%s%c" "HTTPS=%s%c" "TIMEOUT=%d%c"
+    "CACHE=%s%c" "CACHEDUR=%d%c" "RETRY=%d%c" "LOGLVL=%s%c" "FORMAT=%s%c";
+
+/*
  * Per-user VDA size required for FSE session data.
  * Computed at init as the maximum across all forms and declared via dclvda().
  * vdaptr is used directly as the sesbuf for all forms.
@@ -201,14 +260,19 @@ static INT snt_vda_sz = 0;
  * offsets match the key spec passed to dfaCreateSpec, regardless of the
  * compiler's default alignment.
  *
- * version == 7 identifies this layout.  If a record with a different version
- * is found at startup, it is replaced with fresh defaults.  Field sizes:
- *   16 + 1 + 1 + 16 + 1 + 4 + 1 + 1 + 4 + 16 + 80 + 1 + 370 = 512 bytes
+ * version == 9 identifies this layout (v8 added the GeoIP block; v9 added the
+ * split write-mode / country field / country format / cache-mode flag).
+ * Field sizes:
+ *   original v7 core .......... 142 bytes
+ *   GeoIP block (v8) .......... 213 bytes
+ *   GeoIP split block (v9) ....   7 bytes
+ *   spare ..................... 150 bytes
+ *   total ..................... 512 bytes
  */
 #pragma pack(push, 1)
 struct sntipctlcfg {
     CHAR            recid[16];                      /* key: "SNTIPCTL"         */
-    CHAR            version;                        /* struct version (7)      */
+    CHAR            version;                        /* struct version (9)      */
     CHAR            proxy_trust;                    /* 'Y'/'N'                 */
     struct snt_cidr proxy_cidrs[2];                 /* trusted proxy CIDRs     */
     CHAR            conn_limit;                     /* 'Y'/'N'                 */
@@ -219,9 +283,38 @@ struct sntipctlcfg {
     CHAR            bypass_key[16];                 /* BBS key name or empty   */
     struct snt_cidr whitelist[10];                  /* conn-limit whitelist    */
     CHAR            proxy_block;                    /* 'Y'/'N' require proxy   */
-    CHAR            spare[370];                     /* pad to 512 bytes        */
+
+    /* ---- GeoIP Location block (added in struct version 8, v1.1.0) ---- */
+    CHAR            geoip_on;                       /* 'Y'/'N'                 */
+    INT             geoip_fld;                      /* profile field 1-5       */
+    CHAR            geoip_provider;                 /* GEOPRV_* id             */
+    CHAR            geoip_https;                    /* 'Y'/'N' use TLS         */
+    INT             geoip_timeout;                  /* per-request seconds     */
+    CHAR            geoip_cache_on;                 /* 'Y'/'N'                 */
+    INT             geoip_cache_min;                /* cache TTL in minutes    */
+    INT             geoip_retry;                    /* retries on failure 0-5  */
+    CHAR            geoip_loglvl;                   /* GEOLOG_* verbosity      */
+    CHAR            geoip_host[64];                 /* API host, e.g. ipwho.is */
+    CHAR            geoip_key[80];                  /* API key/token or empty  */
+    CHAR            geoip_format[48];               /* location format template*/
+
+    /* ---- GeoIP split write-mode block (added in struct version 9) ---- */
+    CHAR            geoip_split;                    /* 'Y'=split 'N'=combined  */
+    INT             geoip_cty_fld;                  /* country field 1-5       */
+    CHAR            geoip_cty_fmt;                  /* GEOCF_* full/code       */
+    CHAR            geoip_cache_bytime;             /* 'Y'=time expiry 'N'=per-IP */
+
+    CHAR            spare[150];                     /* pad to 512 bytes        */
 };
 #pragma pack(pop)
+
+/*
+ * Compile-time guard: the on-disk record must stay exactly 512 bytes so it
+ * matches the length passed to dfaCreateSpec/dfaOpen and remains compatible
+ * with existing SNTIPCTL.DAT files.  If the struct size ever drifts, this
+ * declares an array with a negative size and the build fails here.
+ */
+typedef CHAR sntipctlcfg_is_512[(sizeof(struct sntipctlcfg) == 512) ? 1 : -1];
 
 static DFAFILE             *sntbt = NULL;   /* SNTIPCTL.DAT file handle */
 static struct sntipctlcfg   sntcfg;         /* in-memory config record  */
@@ -247,7 +340,8 @@ static INT        count_active_ip(ULONG ip);
 static VOID       parse_gateway_config(CHAR *modname, INT modnamsiz, INT *maxip,
                                         CHAR *bypass, INT bypasssiz);
 static GBOOL      gw_has_bypass_key(const CHAR *bypass);
-static INT        count_ip_in_mod(ULONG user_ip, INT target_state);
+static GBOOL      gw_other_has_bypass_key(INT channel, const CHAR *bypass);
+static INT        count_ip_in_mod(ULONG user_ip, INT target_state, const CHAR *bypass);
 static VOID       build_ip_in_mod_users(ULONG user_ip, INT target_state, CHAR *buf, INT bufsiz);
 static VOID       build_active_ip_users(ULONG user_ip, CHAR *buf, INT bufsiz);
 static GBOOL      sntipctl_gateway(VOID);
@@ -286,6 +380,32 @@ static VOID cfg_load(VOID);
 static INT  sntipctl_gbl(VOID);
 static VOID editor_pager_suppress(VOID);
 static VOID editor_pager_restore(VOID);
+
+/* ---- GeoIP Location subsystem ---- */
+struct geo_loc;                                      /* defined below              */
+static VOID  geoip_start(VOID);
+static VOID  geoip_stop(VOID);
+static VOID  geoip_enqueue(INT channel, ULONG ip, const CHAR *userid);
+static VOID  geoip_drain(VOID);                      /* rtkick target, main thread */
+static unsigned __stdcall geoip_worker(VOID *arg);   /* background thread          */
+static GBOOL geoip_http_get(const CHAR *host, const CHAR *path, GBOOL https,
+                            INT timeout_s, CHAR *body, INT bodysz, INT *status);
+static VOID  geoip_build_url(INT provider, ULONG ip, CHAR *host, INT hostsz,
+                             CHAR *path, INT pathsz);
+static GBOOL geoip_parse_body(INT provider, const CHAR *body, struct geo_loc *out);
+static VOID  geo_format(const CHAR *fmt, const struct geo_loc *L, GBOOL inc_country,
+                        CHAR *out, INT outsz);
+static GBOOL geo_set_field(struct usracc *ua, INT fieldnum, const CHAR *val);
+static VOID  geoip_apply(INT channel, const CHAR *userid, const struct geo_loc *L);
+static VOID  geoip_log(INT level, const CHAR *userid, ULONG ip, const CHAR *event);
+static GBOOL geo_cache_lookup(ULONG ip, struct geo_loc *out);
+static VOID  geo_cache_store(ULONG ip, const struct geo_loc *L);
+static GBOOL is_private_ip(ULONG ip);
+static GBOOL json_get_str(const CHAR *body, const CHAR *key, CHAR *out, INT outsz);
+static GBOOL json_get_bool_true(const CHAR *body, const CHAR *key);
+static VOID  cfg_launch_geo(VOID);
+static VOID  cfg_geo_done(SHORT save);
+static INT   cfg_geo_vfy(INT fldno, CHAR *answer);
 
 /* ======================================================================== */
 /*   Module interface block                                                  */
@@ -342,7 +462,7 @@ init__sntipctl(VOID)
     /* Open message file (LEVEL6 + LEVEL99 FSE templates -- no GCNF). */
     modmb = opnmsg("SNTIPCTL.MCV");
     if (modmb == NULL)
-        shocst("Total IP Control", "WARNING: SNTIPCTL.MCV not found -- run GCNF then restart BBS");
+        shocst("Total IP Control", "WARNING: SNTIPCTL.MCV not found -- ensure SNTIPCTL.MSG is installed in the BBS directory");
 
     /*
      * Declare per-user VDA space for FSE config editor sessions.
@@ -350,15 +470,17 @@ init__sntipctl(VOID)
      * vdaptr region covers whichever form the Sysop opens.
      */
     if (modmb != NULL) {
-        INT r1, r2, r3;
+        INT r1, r2, r3, r4;
         setmbk(modmb);
         r1 = fsdroom(SNTCFG_GEN, gen_fsp, 0);
         r2 = fsdroom(SNTCFG_PRX, prx_fsp, 0);
         r3 = fsdroom(SNTCFG_WL,  wl1_fsp, 0);
+        r4 = fsdroom(SNTCFG_GEO, geo_fsp, 0);
         rstmbk();
         snt_vda_sz = r1;
         if (r2 > snt_vda_sz) snt_vda_sz = r2;
         if (r3 > snt_vda_sz) snt_vda_sz = r3;
+        if (r4 > snt_vda_sz) snt_vda_sz = r4;
         if (snt_vda_sz > 0)
             dclvda(snt_vda_sz);
         else
@@ -377,6 +499,25 @@ init__sntipctl(VOID)
     usrip_field         = 1;
     setmem((CHAR *)bypass_key,      sizeof(bypass_key),      0);
     setmem((CHAR *)whitelist_cidrs, sizeof(whitelist_cidrs), 0);
+
+    /* GeoIP Location defaults -- disabled, ipwho.is, 24h cache.
+     * Default write mode is SPLIT: city/state -> Address 3, country -> Address 4. */
+    geoip_enabled   = FALSE;
+    geoip_field     = 3;
+    geoip_split     = TRUE;
+    geoip_cty_field = 4;
+    geoip_cty_fmt   = GEOCF_FULL;
+    geoip_provider  = GEOPRV_IPWHOIS;
+    geoip_use_https = TRUE;
+    geoip_timeout   = 5;
+    geoip_cache_on     = TRUE;
+    geoip_cache_bytime = TRUE;
+    geoip_cache_min = 1440;
+    geoip_retries   = 1;
+    geoip_loglevel  = GEOLOG_NORMAL;
+    stzcpy(geoip_host,   "ipwho.is",                    sizeof(geoip_host));
+    setmem((CHAR *)geoip_key, sizeof(geoip_key), 0);
+    stzcpy(geoip_format, "{city}, {region}, {country}", sizeof(geoip_format));
 
     /*
      * Create SNTIPCTL.DAT only on first run.
@@ -403,6 +544,12 @@ init__sntipctl(VOID)
         CreateDirectoryA("TOTALIPCONTROL\\DENIED MODULE ACCESS", NULL);
     }
 
+    /* GeoIP logging has its own verbosity switch and its own log folder. */
+    if (geoip_loglevel != GEOLOG_OFF) {
+        CreateDirectoryA("TOTALIPCONTROL", NULL);
+        CreateDirectoryA("TOTALIPCONTROL\\GEOIP LOGS", NULL);
+    }
+
     if (proxy_trust_enabled)
         shocst("Total IP Control", spr("trusted proxy enforcement enabled (%d CIDR(s) configured)", trusted_proxy_count));
     if (proxy_block_enabled) {
@@ -417,6 +564,9 @@ init__sntipctl(VOID)
         shocst("Total IP Control", "audit file logging enabled in TOTALIPCONTROL folder");
     if (usrip_enabled)
         shocst("Total IP Control", spr("user profile IP recording enabled (field %d)", usrip_field));
+    if (geoip_enabled)
+        shocst("Total IP Control", spr("GeoIP location lookups enabled (host %s, profile field %d)",
+                                       geoip_host[0] ? geoip_host : "ipwho.is", geoip_field));
 
     /* Resolve tcpipinf at runtime. */
     hGaltcpip = GetModuleHandleA("GALTCPIP.DLL");
@@ -465,6 +615,13 @@ init__sntipctl(VOID)
     }
 
     shocst("Total IP Control", "hdlcon hook installed -- proxy detection active");
+
+    /*
+     * Start the GeoIP background worker + result-drain rtkick.  The
+     * infrastructure is always created (it is idle and cheap when the feature
+     * is off); actual lookups only occur when geoip_enabled is set.
+     */
+    geoip_start();
 
     globalcmd(sntipctl_gbl);
 }
@@ -1215,6 +1372,15 @@ sntipctl_logon(VOID)
     if (usrip_enabled)
         write_ip_to_profile(user_ip);
 
+    /*
+     * Queue a GeoIP location lookup for this session.  This returns instantly
+     * (the actual HTTP request runs on the worker thread), so login is never
+     * delayed.  The userid is snapshotted here so the async result can be
+     * matched back to this exact user even if the channel is later reused.
+     */
+    if (geoip_enabled && usaptr != NULL)
+        geoip_enqueue(usrnum, user_ip, usaptr->userid);
+
     return 0;
 }
 
@@ -1246,6 +1412,12 @@ sntipctl_hup(VOID)
 static VOID
 sntipctl_fin(VOID)
 {
+    /*
+     * Stop the GeoIP worker FIRST and join it, so the thread cannot still be
+     * running (and touching module state) while the DLL is unloaded.
+     */
+    geoip_stop();
+
     if (patched_iat_entry != NULL && real_recv != NULL) {
         DWORD old_prot;
         VirtualProtect(patched_iat_entry, sizeof(recv_fn_t), PAGE_READWRITE, &old_prot);
@@ -1341,6 +1513,870 @@ sntipctl_log_event(const CHAR *subdir, const CHAR *userid, ULONG ip, const CHAR 
         fclose(fp);
     }
     LeaveCriticalSection(&log_cs);
+}
+
+/* ======================================================================== */
+/*   GeoIP Location                                                          */
+/*                                                                           */
+/*   At logon, the caller's approximate City / State / Country is looked up  */
+/*   from their (real, post-proxy) IP address via an online geolocation      */
+/*   provider and written to a configurable user profile field.             */
+/*                                                                           */
+/*   THREADING MODEL (why it is built this way)                             */
+/*   --------------------------------------------------------------------    */
+/*   The BBS runs a single cooperative scheduler thread; any blocking call   */
+/*   made from a hook routine freezes the whole board.  An HTTP request can  */
+/*   take seconds, so the lookup MUST NOT run on the main thread.            */
+/*                                                                           */
+/*   Instead:                                                                */
+/*     - At logon (main thread) we snapshot the caller's IP (a plain 32-bit  */
+/*       value) and userid into a request, and push it onto a queue.  The    */
+/*       worker thread reads ONLY that inert snapshot -- never any BBS       */
+/*       global (usrnum, tcpipinf, usaptr), which the engine reuses the      */
+/*       instant a channel hangs up.                                         */
+/*     - A background worker thread performs the WinHTTP request + JSON      */
+/*       parse and pushes the formatted location onto a result queue.  It    */
+/*       calls NO BBS SDK function (those are not thread-safe); its only     */
+/*       outward action is file logging, which is guarded by log_cs.         */
+/*     - A once-per-second rtkick() routine (geoip_drain, main thread) is    */
+/*       the ONLY place results are applied: it writes the profile field via */
+/*       updaccu(uacoff(channel)), re-checking the userid still matches the  */
+/*       snapshot so a recycled channel is never written to the wrong user.  */
+/*                                                                           */
+/*   A per-IP cache (main-thread only) means repeat logins from the same IP  */
+/*   cost zero API calls.  Private/reserved IPs are never looked up.  A      */
+/*   failed lookup is logged and dropped -- it can never delay or block a    */
+/*   user from logging in.                                                   */
+/* ======================================================================== */
+
+#define GEO_Q_MAX      64       /* request / result ring capacity           */
+#define GEO_LOC_SZ     80       /* max formatted location string            */
+#define GEO_BODY_SZ    4096     /* max JSON response body captured          */
+#define GEO_UID_SZ     UIDSIZ   /* userid buffer size (30)                  */
+#define GEO_CACHE_MAX  512      /* per-IP cache entries                     */
+
+/*
+ * Location components extracted from a provider response.  region is already
+ * resolved to the US two-letter state code (or the full subdivision name
+ * elsewhere).  Formatting into the profile field(s) happens later, on the main
+ * thread, so it always uses the current write-mode / format settings.
+ */
+struct geo_loc {
+    CHAR city[64];
+    CHAR region[64];          /* US 2-letter state code, or full subdivision */
+    CHAR country[64];         /* full country name                          */
+    CHAR ccode[8];            /* two-letter ISO country code                */
+};
+
+/* Snapshot of everything the worker needs -- no BBS globals are referenced. */
+struct geo_req {
+    INT   channel;              /* originating channel (for result apply)   */
+    ULONG ip;                   /* source IP (network byte order)           */
+    CHAR  userid[GEO_UID_SZ];   /* userid at enqueue (revalidated on apply) */
+    CHAR  host[64];             /* API host                                 */
+    CHAR  path[192];            /* API request path (incl. IP and key)      */
+    GBOOL https;                /* use TLS                                  */
+    INT   timeout;             /* per-leg WinHTTP timeout (seconds)         */
+    INT   provider;            /* GEOPRV_* id                              */
+    INT   retries;             /* extra attempts after first failure        */
+};
+
+/* Completed lookup handed back to the main thread. */
+struct geo_res {
+    INT            channel;
+    ULONG          ip;
+    CHAR           userid[GEO_UID_SZ];
+    GBOOL          ok;
+    struct geo_loc loc;         /* extracted components                     */
+};
+
+static CRITICAL_SECTION geo_cs;                 /* guards both queues       */
+static HANDLE geo_ev_work = NULL;               /* auto-reset: work queued  */
+static HANDLE geo_ev_stop = NULL;               /* manual-reset: shutdown   */
+static HANDLE geo_worker  = NULL;               /* the background thread    */
+static GBOOL  geo_started = FALSE;
+
+static struct geo_req geo_reqq[GEO_Q_MAX];
+static INT geo_reqh = 0, geo_reqt = 0, geo_reqn = 0;
+static struct geo_res geo_resq[GEO_Q_MAX];
+static INT geo_resh = 0, geo_rest = 0, geo_resn = 0;
+
+/* Per-IP cache -- accessed ONLY from the main thread (enqueue + drain). */
+struct geo_cent {
+    ULONG          ip;         /* 0 = empty slot                            */
+    ULONGLONG      expiry;     /* GetTickCount64() ms when entry expires    */
+    struct geo_loc loc;        /* cached components                         */
+};
+static struct geo_cent geo_cache[GEO_CACHE_MAX];
+static INT geo_cache_next = 0; /* round-robin eviction cursor               */
+
+/*
+ * is_private_ip
+ *
+ * Returns TRUE for IPs that a public GeoIP provider cannot resolve: RFC1918
+ * private ranges, loopback, link-local, CGNAT, and 0.0.0.0.  These are never
+ * looked up (it would waste an API call and always fail).  ip is in network
+ * byte order, so b[0] is the first dotted octet.
+ */
+static GBOOL
+is_private_ip(ULONG ip)
+{
+    unsigned char *b = (unsigned char *)&ip;
+    if (ip == 0) return TRUE;
+    if (b[0] == 10)  return TRUE;                        /* 10.0.0.0/8       */
+    if (b[0] == 127) return TRUE;                        /* 127.0.0.0/8      */
+    if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return TRUE; /* 172.16/12   */
+    if (b[0] == 192 && b[1] == 168) return TRUE;         /* 192.168.0.0/16   */
+    if (b[0] == 169 && b[1] == 254) return TRUE;         /* 169.254.0.0/16   */
+    if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return TRUE; /* 100.64/10  */
+    return FALSE;
+}
+
+/*
+ * geoip_log
+ *
+ * Appends one line to today's GEOIP LOGS file if the event's level is within
+ * the configured verbosity.  CRT/Win32 only (fopen + log_cs) so it is safe to
+ * call from BOTH the worker thread and the main thread.  Independent of the
+ * global audit-logging toggle -- GeoIP has its own log level.
+ */
+static VOID
+geoip_log(INT level, const CHAR *userid, ULONG ip, const CHAR *event)
+{
+    SYSTEMTIME     st;
+    CHAR           logpath[MAX_PATH];
+    CHAR           line[512];
+    CHAR           ipbuf[20];
+    FILE          *fp;
+    unsigned char *b;
+
+    if (geoip_loglevel == GEOLOG_OFF || level > geoip_loglevel) return;
+
+    GetLocalTime(&st);
+    build_log_path("GEOIP LOGS", logpath, sizeof(logpath));
+
+    b = (unsigned char *)&ip;
+    _snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+
+    _snprintf(line, sizeof(line),
+              "%04d-%02d-%02d %02d:%02d:%02d  %-20s  %-15s  %s\n",
+              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+              (userid != NULL && userid[0] != '\0') ? userid : "(geoip)",
+              ipbuf, event != NULL ? event : "");
+
+    EnterCriticalSection(&log_cs);
+    fp = fopen(logpath, "a");
+    if (fp != NULL) { fputs(line, fp); fclose(fp); }
+    LeaveCriticalSection(&log_cs);
+}
+
+/*
+ * json_get_str
+ *
+ * Minimal JSON string-value extractor: finds "key" : "value" in body and
+ * copies value (with basic \-unescaping) into out.  Returns FALSE if the key
+ * is absent or its value is not a string.  Sufficient for the small, known
+ * provider responses; avoids pulling in a JSON library.  CRT only.
+ */
+static GBOOL
+json_get_str(const CHAR *body, const CHAR *key, CHAR *out, INT outsz)
+{
+    CHAR        pat[64];
+    const CHAR *p;
+    INT         i = 0;
+
+    out[0] = '\0';
+    _snprintf(pat, sizeof(pat), "\"%s\"", key);
+    p = strstr(body, pat);
+    if (p == NULL) return FALSE;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != ':') return FALSE;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != '"') return FALSE;                 /* only string values       */
+    p++;
+    while (*p != '\0' && *p != '"' && i < outsz - 1) {
+        if (*p == '\\' && p[1] != '\0') {
+            p++;
+            if      (*p == 'n') out[i++] = '\n';
+            else if (*p == 't') out[i++] = '\t';
+            else                out[i++] = *p;   /* \" \\ \/ and others      */
+            p++;
+        } else {
+            out[i++] = *p++;
+        }
+    }
+    out[i] = '\0';
+    return TRUE;
+}
+
+/*
+ * json_get_bool_true
+ *
+ * Returns TRUE only if body contains "key" : true.  Used for the provider
+ * success/error indicator ("success":true for ipwho.is, "error":true for
+ * ipapi.co).  CRT only.
+ */
+static GBOOL
+json_get_bool_true(const CHAR *body, const CHAR *key)
+{
+    CHAR        pat[64];
+    const CHAR *p;
+
+    _snprintf(pat, sizeof(pat), "\"%s\"", key);
+    p = strstr(body, pat);
+    if (p == NULL) return FALSE;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != ':') return FALSE;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    return (GBOOL)(strncmp(p, "true", 4) == 0);
+}
+
+/*
+ * geo_join_clean
+ *
+ * Rebuilds raw as comma-separated segments, dropping empty/whitespace-only
+ * segments and re-joining survivors with ", ".  This turns a template result
+ * like "Minneapolis, , United States" (empty region) into a clean
+ * "Minneapolis, United States".  No strtok (which has static state) so it is
+ * safe on the worker thread.  CRT only.
+ */
+static VOID
+geo_join_clean(const CHAR *raw, CHAR *out, INT outsz)
+{
+    const CHAR *p = raw;
+    INT         oi = 0, first = 1;
+
+    while (*p != '\0') {
+        CHAR seg[GEO_LOC_SZ];
+        INT  si = 0, L;
+
+        while (*p == ' ') p++;                    /* skip leading spaces      */
+        while (*p != '\0' && *p != ',') {
+            if (si < (INT)sizeof(seg) - 1) seg[si++] = *p;
+            p++;
+        }
+        seg[si] = '\0';
+        L = si;
+        while (L > 0 && seg[L - 1] == ' ') seg[--L] = '\0';  /* trim trailing */
+
+        if (seg[0] != '\0') {
+            INT k = 0;
+            if (!first && oi < outsz - 2) { out[oi++] = ','; out[oi++] = ' '; }
+            while (seg[k] != '\0' && oi < outsz - 1) out[oi++] = seg[k++];
+            first = 0;
+        }
+        if (*p == ',') p++;
+    }
+    out[oi] = '\0';
+}
+
+/*
+ * geoip_build_url  (MAIN THREAD, at enqueue)
+ *
+ * Builds the provider-specific host and request path for the given IP.  This
+ * is the request-construction half of the provider abstraction: adding a
+ * provider means adding a case here and a matching case in geoip_parse_body().
+ * Runs on the main thread so it may read the live config globals safely.
+ */
+static VOID
+geoip_build_url(INT provider, ULONG ip, CHAR *host, INT hostsz, CHAR *path, INT pathsz)
+{
+    CHAR           ipbuf[20];
+    unsigned char *b = (unsigned char *)&ip;
+
+    _snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+
+    /* Host: sysop override wins; otherwise the provider's default host. */
+    if (geoip_host[0] != '\0') {
+        stzcpy(host, geoip_host, hostsz);
+    } else {
+        switch (provider) {
+        case GEOPRV_IPAPI:   stzcpy(host, "ip-api.com", hostsz); break;
+        case GEOPRV_IPAPICO: stzcpy(host, "ipapi.co",   hostsz); break;
+        default:             stzcpy(host, "ipwho.is",   hostsz); break;
+        }
+    }
+
+    switch (provider) {
+    case GEOPRV_IPAPI:
+        /* ip-api.com: request only the fields we use. */
+        _snprintf(path, pathsz,
+                  "/json/%s?fields=status,country,countryCode,region,regionName,city",
+                  ipbuf);
+        break;
+    case GEOPRV_IPAPICO:
+        _snprintf(path, pathsz, "/%s/json/", ipbuf);
+        break;
+    default: /* GEOPRV_IPWHOIS */
+        if (geoip_key[0] != '\0')
+            _snprintf(path, pathsz, "/%s?key=%s", ipbuf, geoip_key);
+        else
+            _snprintf(path, pathsz, "/%s", ipbuf);
+        break;
+    }
+}
+
+/*
+ * geoip_parse_body  (WORKER THREAD)
+ *
+ * Provider-specific response parser -- the second half of the provider
+ * abstraction.  Extracts city / region / country / country-code into `out`,
+ * choosing the US two-letter state code (or the full subdivision name
+ * elsewhere) for region.  It does NOT format -- that happens on the main thread
+ * (geo_format), so the current write-mode/format settings always apply.
+ * Returns TRUE if any usable component was found.  CRT only (no BBS SDK).
+ */
+static GBOOL
+geoip_parse_body(INT provider, const CHAR *body, struct geo_loc *out)
+{
+    CHAR regfull[64] = "", regcode[16] = "";
+
+    memset(out, 0, sizeof(*out));
+
+    switch (provider) {
+    case GEOPRV_IPAPI: {
+        CHAR st[16] = "";
+        if (!json_get_str(body, "status", st, sizeof(st)) || _stricmp(st, "success") != 0)
+            return FALSE;
+        json_get_str(body, "city",        out->city,    sizeof(out->city));
+        json_get_str(body, "region",      regcode,      sizeof(regcode)); /* US 2-letter */
+        json_get_str(body, "regionName",  regfull,      sizeof(regfull));
+        json_get_str(body, "countryCode", out->ccode,   sizeof(out->ccode));
+        json_get_str(body, "country",     out->country, sizeof(out->country));
+        break; }
+    case GEOPRV_IPAPICO:
+        if (json_get_bool_true(body, "error")) return FALSE;
+        json_get_str(body, "city",         out->city,    sizeof(out->city));
+        json_get_str(body, "region_code",  regcode,      sizeof(regcode));
+        json_get_str(body, "region",       regfull,      sizeof(regfull));
+        json_get_str(body, "country",      out->ccode,   sizeof(out->ccode));   /* 2-letter */
+        json_get_str(body, "country_name", out->country, sizeof(out->country));
+        break;
+    default: /* GEOPRV_IPWHOIS */
+        if (!json_get_bool_true(body, "success")) return FALSE;
+        json_get_str(body, "city",         out->city,    sizeof(out->city));
+        json_get_str(body, "region_code",  regcode,      sizeof(regcode));
+        json_get_str(body, "region",       regfull,      sizeof(regfull));
+        json_get_str(body, "country_code", out->ccode,   sizeof(out->ccode));
+        json_get_str(body, "country",      out->country, sizeof(out->country));
+        break;
+    }
+
+    /* US -> two-letter state code; elsewhere -> full subdivision name. */
+    if (_stricmp(out->ccode, "US") == 0 && regcode[0] != '\0')
+        stzcpy(out->region, regcode, sizeof(out->region));
+    else if (regfull[0] != '\0')
+        stzcpy(out->region, regfull, sizeof(out->region));
+    else
+        stzcpy(out->region, regcode, sizeof(out->region));
+
+    return (GBOOL)(out->city[0] != '\0' || out->region[0] != '\0' || out->country[0] != '\0');
+}
+
+/*
+ * geo_format
+ *
+ * Substitutes {city} {region} {country} {cc} in the template and drops empty
+ * comma segments (geo_join_clean).  inc_country == FALSE renders {country} and
+ * {cc} as empty -- used to build the city/state field in SPLIT write mode.
+ * CRT only, so it is safe on either thread (but is only called on the main
+ * thread here).
+ */
+static VOID
+geo_format(const CHAR *fmt, const struct geo_loc *L, GBOOL inc_country, CHAR *out, INT outsz)
+{
+    CHAR        raw[160];
+    const CHAR *p;
+    INT         oi = 0;
+
+    p = (fmt != NULL && fmt[0] != '\0') ? fmt : "{city}, {region}, {country}";
+    while (*p != '\0' && oi < (INT)sizeof(raw) - 1) {
+        const CHAR *sub = NULL;
+        INT         adv = 0;
+        if      (!strncmp(p, "{city}",    6)) { sub = L->city;    adv = 6; }
+        else if (!strncmp(p, "{region}",  8)) { sub = L->region;  adv = 8; }
+        else if (!strncmp(p, "{country}", 9)) { sub = inc_country ? L->country : ""; adv = 9; }
+        else if (!strncmp(p, "{cc}",      4)) { sub = inc_country ? L->ccode   : ""; adv = 4; }
+        if (sub != NULL) {
+            p += adv;
+            while (*sub != '\0' && oi < (INT)sizeof(raw) - 1) raw[oi++] = *sub++;
+        } else {
+            raw[oi++] = *p++;
+        }
+    }
+    raw[oi] = '\0';
+    geo_join_clean(raw, out, outsz);
+}
+
+/*
+ * geoip_http_get  (WORKER THREAD)
+ *
+ * Performs one blocking WinHTTP GET.  Every WinHTTP leg is bounded by
+ * timeout_s, and the read loop bails out if the shutdown event is signalled,
+ * so this can never block the worker (or shutdown) indefinitely.  Returns TRUE
+ * if a response body was read; *status receives the HTTP status code.  CRT +
+ * WinHTTP only.
+ */
+static GBOOL
+geoip_http_get(const CHAR *host, const CHAR *path, GBOOL https,
+               INT timeout_s, CHAR *body, INT bodysz, INT *status)
+{
+    wchar_t       whost[128], wpath[256];
+    HINTERNET     hS = NULL, hC = NULL, hR = NULL;
+    GBOOL         ok = FALSE;
+    DWORD         total = 0, tmo;
+    INTERNET_PORT port;
+
+    *status = 0;
+    body[0] = '\0';
+    if (host == NULL || host[0] == '\0') return FALSE;
+
+    MultiByteToWideChar(CP_UTF8, 0, host, -1, whost, 128);
+    MultiByteToWideChar(CP_UTF8, 0, (path != NULL && path[0]) ? path : "/", -1, wpath, 256);
+    tmo  = (DWORD)((timeout_s > 0 ? timeout_s : 5) * 1000);
+    port = https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+
+    hS = WinHttpOpen(L"SNTIPCTL/1.1 (Total IP Control)",
+                     WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (hS == NULL) goto done;
+    WinHttpSetTimeouts(hS, (int)tmo, (int)tmo, (int)tmo, (int)tmo);
+
+    hC = WinHttpConnect(hS, whost, port, 0);
+    if (hC == NULL) goto done;
+
+    hR = WinHttpOpenRequest(hC, L"GET", wpath, NULL, WINHTTP_NO_REFERER,
+                            WINHTTP_DEFAULT_ACCEPT_TYPES,
+                            https ? WINHTTP_FLAG_SECURE : 0);
+    if (hR == NULL) goto done;
+
+    WinHttpAddRequestHeaders(hR, L"Accept: application/json",
+                             (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
+
+    if (!WinHttpSendRequest(hR, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) goto done;
+    if (!WinHttpReceiveResponse(hR, NULL)) goto done;
+
+    {
+        DWORD st = 0, len = sizeof(st);
+        if (WinHttpQueryHeaders(hR,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                WINHTTP_HEADER_NAME_BY_INDEX, &st, &len, WINHTTP_NO_HEADER_INDEX))
+            *status = (INT)st;
+    }
+
+    for (;;) {
+        DWORD avail = 0, rd = 0;
+        if (WaitForSingleObject(geo_ev_stop, 0) == WAIT_OBJECT_0) goto done;
+        if (!WinHttpQueryDataAvailable(hR, &avail)) goto done;
+        if (avail == 0) { ok = TRUE; break; }              /* end of body     */
+        if (total + avail >= (DWORD)bodysz) avail = (DWORD)bodysz - 1 - total;
+        if (avail == 0) { ok = TRUE; break; }              /* body cap hit    */
+        if (!WinHttpReadData(hR, body + total, avail, &rd)) goto done;
+        if (rd == 0) { ok = TRUE; break; }                 /* EOF             */
+        total += rd;
+    }
+    body[total] = '\0';
+
+done:
+    if (hR != NULL) WinHttpCloseHandle(hR);
+    if (hC != NULL) WinHttpCloseHandle(hC);
+    if (hS != NULL) WinHttpCloseHandle(hS);
+    return ok;
+}
+
+/*
+ * geoip_worker  (BACKGROUND THREAD)
+ *
+ * Drains the request queue, performing one HTTP lookup per request (with
+ * optional retries), and pushes successful results back to the main thread.
+ * Touches NO BBS SDK function; logs via the thread-safe geoip_log().  Exits
+ * promptly when geo_ev_stop is signalled.
+ */
+static unsigned __stdcall
+geoip_worker(VOID *arg)
+{
+    HANDLE waits[2];
+
+    (VOID)arg;
+    waits[0] = geo_ev_stop;
+    waits[1] = geo_ev_work;
+
+    for (;;) {
+        DWORD w = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+        if (w == WAIT_OBJECT_0) break;                     /* shutdown        */
+
+        for (;;) {
+            struct geo_req q;
+            struct geo_res r;
+            CHAR           body[GEO_BODY_SZ];
+            INT            got = 0, attempt, status;
+
+            if (WaitForSingleObject(geo_ev_stop, 0) == WAIT_OBJECT_0) return 0;
+
+            EnterCriticalSection(&geo_cs);
+            if (geo_reqn > 0) {
+                q = geo_reqq[geo_reqh];
+                geo_reqh = (geo_reqh + 1) % GEO_Q_MAX;
+                geo_reqn--;
+                got = 1;
+            }
+            LeaveCriticalSection(&geo_cs);
+            if (!got) break;                               /* queue drained   */
+
+            memset(&r, 0, sizeof(r));
+            r.channel = q.channel;
+            r.ip      = q.ip;
+            strncpy(r.userid, q.userid, sizeof(r.userid) - 1);
+
+            for (attempt = 0; attempt <= q.retries; attempt++) {
+                if (WaitForSingleObject(geo_ev_stop, 0) == WAIT_OBJECT_0) return 0;
+                status = 0;
+                if (geoip_http_get(q.host, q.path, q.https, q.timeout,
+                                   body, sizeof(body), &status)) {
+                    if (status == 200) {
+                        if (geoip_parse_body(q.provider, body, &r.loc)) {
+                            r.ok = TRUE;
+                            geoip_log(GEOLOG_NORMAL, q.userid, q.ip,
+                                      "GeoIP lookup succeeded");
+                        } else {
+                            geoip_log(GEOLOG_ERRORS, q.userid, q.ip,
+                                      "GeoIP response had no usable location");
+                        }
+                        break;                             /* 200 = definitive*/
+                    } else {
+                        CHAR e[80];
+                        if (status == 429)
+                            _snprintf(e, sizeof(e),
+                                      "GeoIP rate limited (HTTP 429), attempt %d",
+                                      attempt + 1);
+                        else
+                            _snprintf(e, sizeof(e),
+                                      "GeoIP HTTP status %d, attempt %d",
+                                      status, attempt + 1);
+                        geoip_log(GEOLOG_ERRORS, q.userid, q.ip, e);
+                    }
+                } else {
+                    CHAR e[80];
+                    _snprintf(e, sizeof(e),
+                              "GeoIP request failed (network/timeout), attempt %d",
+                              attempt + 1);
+                    geoip_log(GEOLOG_ERRORS, q.userid, q.ip, e);
+                }
+                /* Back off before a retry, but wake immediately on shutdown. */
+                if (attempt < q.retries) {
+                    if (WaitForSingleObject(geo_ev_stop, 500) == WAIT_OBJECT_0)
+                        return 0;
+                }
+            }
+
+            /* Only push a usable result; failures are logged and dropped. */
+            if (r.ok) {
+                EnterCriticalSection(&geo_cs);
+                if (geo_resn < GEO_Q_MAX) {
+                    geo_resq[geo_rest] = r;
+                    geo_rest = (geo_rest + 1) % GEO_Q_MAX;
+                    geo_resn++;
+                }
+                LeaveCriticalSection(&geo_cs);
+            }
+        }
+    }
+    return 0;
+}
+
+/*
+ * geo_cache_lookup / geo_cache_store  (MAIN THREAD ONLY)
+ *
+ * Simple linear per-IP cache with per-entry expiry.  Only ever touched from
+ * the main thread (geoip_enqueue and geoip_drain), so no locking is needed.
+ */
+static GBOOL
+geo_cache_lookup(ULONG ip, struct geo_loc *out)
+{
+    INT       i;
+    ULONGLONG now = GetTickCount64();
+    if (ip == 0) return FALSE;
+    for (i = 0; i < GEO_CACHE_MAX; i++) {
+        if (geo_cache[i].ip == ip && geo_cache[i].expiry > now) {
+            *out = geo_cache[i].loc;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static VOID
+geo_cache_store(ULONG ip, const struct geo_loc *L)
+{
+    INT       i, slot = -1;
+    ULONGLONG now = GetTickCount64();
+    ULONGLONG ttl = (ULONGLONG)(geoip_cache_min > 0 ? geoip_cache_min : 1440) * 60000ULL;
+
+    if (ip == 0) return;
+    for (i = 0; i < GEO_CACHE_MAX; i++)          /* reuse existing entry      */
+        if (geo_cache[i].ip == ip) { slot = i; break; }
+    if (slot < 0)                                 /* else an empty/expired one */
+        for (i = 0; i < GEO_CACHE_MAX; i++)
+            if (geo_cache[i].ip == 0 || geo_cache[i].expiry <= now) { slot = i; break; }
+    if (slot < 0) {                               /* else round-robin evict    */
+        slot = geo_cache_next;
+        geo_cache_next = (geo_cache_next + 1) % GEO_CACHE_MAX;
+    }
+    geo_cache[slot].ip     = ip;
+    /*
+     * In per-IP mode (geoip_cache_bytime == FALSE) a known IP is never looked
+     * up again, so the entry does not expire by time -- it lives until the slot
+     * is reused or the BBS restarts.  In time mode it expires after the cache
+     * duration.
+     */
+    geo_cache[slot].expiry = geoip_cache_bytime ? (now + ttl) : (ULONGLONG)-1;
+    geo_cache[slot].loc    = *L;
+}
+
+/*
+ * geo_set_field  (MAIN THREAD)
+ *
+ * Copies val into the numbered usracc field (1=usrad1..4=usrad4, 5=usrpho) but
+ * only if the stored value actually differs.  Returns TRUE if it changed the
+ * field (so the caller knows whether an updaccu() is needed).
+ */
+static GBOOL
+geo_set_field(struct usracc *ua, INT fieldnum, const CHAR *val)
+{
+    CHAR *field;
+    INT   maxlen;
+
+    switch (fieldnum) {
+    case 1: field = ua->usrad1; maxlen = NADSIZ; break;
+    case 2: field = ua->usrad2; maxlen = NADSIZ; break;
+    case 3: field = ua->usrad3; maxlen = NADSIZ; break;
+    case 4: field = ua->usrad4; maxlen = NADSIZ; break;
+    case 5: field = ua->usrpho; maxlen = PHOSIZ; break;
+    default: return FALSE;
+    }
+    if (strncmp(field, val, maxlen - 1) == 0) return FALSE;   /* unchanged */
+    stzcpy(field, val, maxlen);
+    return TRUE;
+}
+
+/*
+ * geoip_apply  (MAIN THREAD)
+ *
+ * Formats the location components and writes them to the user's profile
+ * field(s), honouring the write mode:
+ *   COMBINED -- the whole location (incl. country per the template) in one field.
+ *   SPLIT    -- city/state in geoip_field and the country (full name or 2-letter
+ *               code) in geoip_cty_field.
+ * Applied only if the channel still holds the SAME user (userid) that requested
+ * the lookup, so a recycled channel is never written to the wrong user.  A
+ * single updaccu() persists the record if any field actually changed.
+ */
+static VOID
+geoip_apply(INT channel, const CHAR *userid, const struct geo_loc *L)
+{
+    struct usracc *ua;
+    CHAR           primary[GEO_LOC_SZ];
+    GBOOL          changed = FALSE;
+
+    if (channel < 0 || channel >= nterms) return;
+    ua = uacoff(channel);
+    if (ua == NULL) return;
+    if (userid != NULL && userid[0] != '\0' && strcmp(ua->userid, userid) != 0)
+        return;                                   /* channel reused -- skip    */
+
+    if (geoip_split) {
+        const CHAR *country = (geoip_cty_fmt == GEOCF_CODE) ? L->ccode : L->country;
+        geo_format(geoip_format, L, FALSE, primary, sizeof(primary));   /* City, State */
+        changed |= geo_set_field(ua, geoip_field, primary);
+        /* Only write the country separately when it targets a different field
+         * (guards against a misconfiguration that would clobber city/state). */
+        if (geoip_cty_field != geoip_field)
+            changed |= geo_set_field(ua, geoip_cty_field, country);
+    } else {
+        geo_format(geoip_format, L, TRUE, primary, sizeof(primary));    /* City, State, Country */
+        changed |= geo_set_field(ua, geoip_field, primary);
+    }
+
+    if (!changed) return;                         /* nothing new -- no write   */
+    updaccu(ua);                                  /* persist without curusr()  */
+
+    {
+        CHAR  evt[160];
+        ULONG ip = (pp_tcpipinf != NULL) ? (*pp_tcpipinf)[channel].inaddr.s_addr : 0;
+        if (geoip_split)
+            _snprintf(evt, sizeof(evt),
+                      "GeoIP stored: \"%s\" (field %d) + country (field %d)",
+                      primary, geoip_field, geoip_cty_field);
+        else
+            _snprintf(evt, sizeof(evt), "GeoIP stored to field %d: %s",
+                      geoip_field, primary);
+        geoip_log(GEOLOG_NORMAL, ua->userid, ip, evt);
+    }
+}
+
+/*
+ * geoip_drain  (MAIN THREAD, rtkick target)
+ *
+ * Applies all pending results to their users' profile fields and updates the
+ * cache, then re-arms itself for one second later.  This is the only place a
+ * lookup result re-enters the BBS.
+ *
+ * The self-re-arm means one one-shot kick is always queued while running.  The
+ * leading geo_started guard makes any kick that is dispatched after geoip_stop()
+ * (which clears geo_started and deletes geo_cs) a harmless no-op -- it returns
+ * before touching the freed critical section and does not re-arm.
+ */
+static VOID
+geoip_drain(VOID)
+{
+    if (!geo_started) return;                     /* shutting down -- do nothing */
+
+    for (;;) {
+        struct geo_res r;
+        INT            got = 0;
+
+        EnterCriticalSection(&geo_cs);
+        if (geo_resn > 0) {
+            r = geo_resq[geo_resh];
+            geo_resh = (geo_resh + 1) % GEO_Q_MAX;
+            geo_resn--;
+            got = 1;
+        }
+        LeaveCriticalSection(&geo_cs);
+        if (!got) break;
+
+        if (r.ok) {
+            if (geoip_cache_on) geo_cache_store(r.ip, &r.loc);
+            geoip_apply(r.channel, r.userid, &r.loc);
+        }
+    }
+
+    if (geo_started) rtkick(1, geoip_drain);      /* re-arm for next second    */
+}
+
+/*
+ * geoip_enqueue  (MAIN THREAD, from logon)
+ *
+ * Entry point for a GeoIP lookup.  Skips private/reserved IPs, serves cache
+ * hits immediately, and otherwise snapshots a self-contained request for the
+ * worker thread.  Returns instantly -- login is never delayed.
+ */
+static VOID
+geoip_enqueue(INT channel, ULONG ip, const CHAR *userid)
+{
+    struct geo_req q;
+    struct geo_loc loc;
+
+    if (!geoip_enabled || !geo_started) return;
+
+    if (ip == 0 || ip == (ULONG)INADDR_NONE || is_private_ip(ip)) {
+        geoip_log(GEOLOG_VERBOSE, userid, ip,
+                  "GeoIP skipped (private/reserved/invalid IP)");
+        return;
+    }
+
+    if (geoip_cache_on && geo_cache_lookup(ip, &loc)) {
+        geoip_log(GEOLOG_VERBOSE, userid, ip, "GeoIP cache hit");
+        geoip_apply(channel, userid, &loc);
+        return;
+    }
+    if (geoip_cache_on)
+        geoip_log(GEOLOG_VERBOSE, userid, ip, "GeoIP cache miss -- queuing lookup");
+
+    memset(&q, 0, sizeof(q));
+    q.channel  = channel;
+    q.ip       = ip;
+    stzcpy(q.userid, userid != NULL ? userid : "", sizeof(q.userid));
+    q.https    = geoip_use_https;
+    q.timeout  = geoip_timeout;
+    q.provider = geoip_provider;
+    q.retries  = geoip_retries;
+    geoip_build_url(geoip_provider, ip, q.host, sizeof(q.host), q.path, sizeof(q.path));
+
+    EnterCriticalSection(&geo_cs);
+    if (geo_reqn < GEO_Q_MAX) {
+        geo_reqq[geo_reqt] = q;
+        geo_reqt = (geo_reqt + 1) % GEO_Q_MAX;
+        geo_reqn++;
+        SetEvent(geo_ev_work);
+        LeaveCriticalSection(&geo_cs);
+    } else {
+        LeaveCriticalSection(&geo_cs);
+        geoip_log(GEOLOG_ERRORS, userid, ip,
+                  "GeoIP request queue full -- lookup dropped");
+    }
+}
+
+/*
+ * geoip_start / geoip_stop
+ *
+ * geoip_start creates the worker thread, its signalling events, and arms the
+ * result-drain rtkick.  Called once at init (the infrastructure is cheap when
+ * idle and only actually does work when the feature is enabled).
+ *
+ * geoip_stop signals the worker, JOINS it (so the DLL is never unloaded out
+ * from under a running thread), then tears down the events and critical
+ * section.  Called from finrou on the main thread -- never from DllMain.
+ */
+static VOID
+geoip_start(VOID)
+{
+    if (geo_started) return;
+
+    geo_reqh = geo_reqt = geo_reqn = 0;
+    geo_resh = geo_rest = geo_resn = 0;
+    geo_cache_next = 0;
+    memset(geo_cache, 0, sizeof(geo_cache));
+
+    InitializeCriticalSection(&geo_cs);
+    geo_ev_work = CreateEvent(NULL, FALSE, FALSE, NULL);   /* auto-reset      */
+    geo_ev_stop = CreateEvent(NULL, TRUE,  FALSE, NULL);   /* manual-reset    */
+    if (geo_ev_work == NULL || geo_ev_stop == NULL) {
+        shocst("Total IP Control", "WARNING: GeoIP event objects failed -- lookups disabled");
+        if (geo_ev_work) { CloseHandle(geo_ev_work); geo_ev_work = NULL; }
+        if (geo_ev_stop) { CloseHandle(geo_ev_stop); geo_ev_stop = NULL; }
+        DeleteCriticalSection(&geo_cs);
+        return;
+    }
+
+    geo_worker = (HANDLE)_beginthreadex(NULL, 0, geoip_worker, NULL, 0, NULL);
+    if (geo_worker == NULL) {
+        shocst("Total IP Control", "WARNING: GeoIP worker thread failed -- lookups disabled");
+        CloseHandle(geo_ev_work); geo_ev_work = NULL;
+        CloseHandle(geo_ev_stop); geo_ev_stop = NULL;
+        DeleteCriticalSection(&geo_cs);
+        return;
+    }
+
+    geo_started = TRUE;
+    rtkick(1, geoip_drain);                                /* start the drain */
+}
+
+static VOID
+geoip_stop(VOID)
+{
+    if (!geo_started) return;
+
+    geo_started = FALSE;                          /* stops drain re-arming     */
+    SetEvent(geo_ev_stop);                        /* wake + tell worker to end */
+
+    /*
+     * Join the worker before freeing anything it might touch.  Each WinHTTP
+     * leg is bounded by the configured timeout and the worker checks the stop
+     * event between operations, so it exits promptly; the wait is unbounded
+     * only as a guarantee that teardown never races a live thread.
+     */
+    WaitForSingleObject(geo_worker, INFINITE);
+    CloseHandle(geo_worker); geo_worker = NULL;
+
+    CloseHandle(geo_ev_work); geo_ev_work = NULL;
+    CloseHandle(geo_ev_stop); geo_ev_stop = NULL;
+    DeleteCriticalSection(&geo_cs);
 }
 
 /* ======================================================================== */
@@ -1445,34 +2481,79 @@ editor_pager_restore(VOID)
 /*
  * cfg_show_topmenu
  *
- * Displays the config editor header and top-level menu.  Caller must have
- * setmbk(modmb) in effect.  Flushes output to the current user.
+ * Displays the config editor header, an optional one-line banner (0 for none,
+ * e.g. CFGSAV after a save or CFGBAD after bad input), and the top-level menu.
+ * Caller must have setmbk(modmb) in effect.  Flushes output to the user.
  *
- * Pager suppression for the editor is handled at session level via
- * editor_pager_suppress() (entered in sntipctl_gbl), so this routine no longer
- * needs to toggle scnbrk itself.
+ * The banner is printed AFTER the header (which clears the screen) so it is not
+ * wiped, and appears cleanly above the menu instead of flashing separately.
+ *
+ * scnbrk is (re-)asserted to CTNUOS here but deliberately NOT restored -- the
+ * editor keeps continuous output for its whole session (restored only on exit
+ * via editor_pager_restore), so this menu's asynchronously transmitted output
+ * can never re-arm the "(N)onstop,Q,C?" pager.
  */
 static VOID
-cfg_show_topmenu(VOID)
+cfg_show_topmenu(INT banner)
 {
-    CHAR saved_scnbrk = 0;
+    CHAR  saved_scnbrk = 0;
     GBOOL pager_saved = FALSE;
 
+    /*
+     * Suppress paging around this output.  Because the editor session already
+     * holds scnbrk at CTNUOS (editor_pager_suppress), the value saved here is
+     * itself CTNUOS, so the restore is effectively a no-op that keeps the pager
+     * off -- the menu's output never raises a "(N)onstop,Q,C?" prompt.
+     */
     if (usaptr != NULL) {
         saved_scnbrk = usaptr->scnbrk;
         usaptr->scnbrk = CTNUOS;
-        rstrxf();   /* re-arm btuxnf with continuous (0 lines = no paging) */
+        rstrxf();
         pager_saved = TRUE;
     }
 
     prfmsg(CFGHED);
+    if (banner != 0)
+        prfmsg(banner);          /* one-line status ABOVE the menu (post-clear)*/
     prfmsg(CFGMNU);
     outprf(usrnum);
 
     if (pager_saved) {
-        usaptr->scnbrk = saved_scnbrk;
-        rstrxf();   /* re-arm btuxnf with user's normal screen length */
+        /*
+         * Menu output is transmitted asynchronously by the poll loop, so scnbrk
+         * must stay continuous until it drains.  While the editor session owns
+         * the pager (editor_pager_off), pin it to CTNUOS rather than restoring a
+         * value the FSD teardown may have left paged -- otherwise the async menu
+         * output could still raise the "(N)onstop,Q,C?" prompt.  editor_pager_restore()
+         * puts the user's real screen length back when they leave the editor.
+         */
+        GBOOL in_editor = (usrnum >= 0 && usrnum < MAXNTERM && editor_pager_off[usrnum]);
+        usaptr->scnbrk = in_editor ? CTNUOS : saved_scnbrk;
+        rstrxf();
     }
+}
+
+/*
+ * cfg_finish_form
+ *
+ * Common tail for every FSE whndun callback: redraw the top menu (with an
+ * optional "settings saved" banner) and return the editor to the menu state.
+ * MBBS does not reliably re-enter sttrou on its own after a form closes, so the
+ * menu must be drawn here rather than deferred.  absorb_count swallows the
+ * spurious empty/"/" call(s) MBBS may deliver next.
+ */
+static VOID
+cfg_finish_form(GBOOL saved)
+{
+    if (modmb != NULL) {
+        setmbk(modmb);
+        cfg_show_topmenu(saved ? CFGSAV : 0);
+        rstmbk();
+    }
+    usrptr->state  = cfgstt;
+    usrptr->substt = CFGSTT_MENU;
+    if (usrnum >= 0 && usrnum < MAXNTERM)
+        absorb_count[usrnum] = 2;
 }
 
 /* ======================================================================== */
@@ -1523,24 +2604,11 @@ cfg_launch_gen(VOID)
 static VOID
 cfg_gen_done(SHORT save)
 {
-    CHAR buf[20];
-    INT  ord;
-    CHAR saved_scnbrk = 0;
-    GBOOL pager_saved = FALSE;
+    CHAR  buf[20];
+    INT   ord;
+    GBOOL changed = (save && fsdscb->chgcnt > 0);
 
-    /*
-     * Suppress pager for the save message and menu redisplay.
-     * rstrxf() must be called after setting scnbrk to override the state
-     * left by fsdcof()->rstrxf() which fired before this callback.
-     */
-    if (usaptr != NULL) {
-        saved_scnbrk = usaptr->scnbrk;
-        usaptr->scnbrk = CTNUOS;
-        rstrxf();
-        pager_saved = TRUE;
-    }
-
-    if (save && fsdscb->chgcnt > 0) {
+    if (changed) {
         ord = fsdord(GEN_PRXTRU);
         proxy_trust_enabled = (ord == 1) ? TRUE : FALSE;
 
@@ -1572,34 +2640,9 @@ cfg_gen_done(SHORT save)
         strupr(bypass_key);
 
         cfg_save();
-        if (modmb != NULL) {
-            setmbk(modmb);
-            prfmsg(CFGSAV);
-            rstmbk();
-        }
     }
 
-    if (modmb != NULL) {
-        setmbk(modmb);
-        cfg_show_topmenu();
-        rstmbk();
-    }
-
-    usrptr->state  = cfgstt;
-    usrptr->substt = CFGSTT_MENU;
-
-    /*
-     * Swallow the spurious empty/"/" sttrou call(s) MBBS delivers right after
-     * an FSE session ends, so the save confirmation + menu are not re-rendered
-     * (which looked like a duplicate "Settings saved" screen).
-     */
-    if (usrnum >= 0 && usrnum < MAXNTERM)
-        absorb_count[usrnum] = 2;
-
-    if (pager_saved) {
-        usaptr->scnbrk = saved_scnbrk;
-        rstrxf();   /* restore pager to user's normal screen length */
-    }
+    cfg_finish_form(changed);
 }
 
 /*
@@ -1655,19 +2698,11 @@ cfg_launch_prx(VOID)
 static VOID
 cfg_prx_done(SHORT save)
 {
-    CHAR buf[24];
-    INT  i;
-    CHAR saved_scnbrk = 0;
-    GBOOL pager_saved = FALSE;
+    CHAR  buf[24];
+    INT   i;
+    GBOOL changed = (save && fsdscb->chgcnt > 0);
 
-    if (usaptr != NULL) {
-        saved_scnbrk = usaptr->scnbrk;
-        usaptr->scnbrk = CTNUOS;
-        rstrxf();
-        pager_saved = TRUE;
-    }
-
-    if (save && fsdscb->chgcnt > 0) {
+    if (changed) {
         for (i = 0; i < SNTIPCTL_MAX_TRUSTED; i++) {
             fsdfxt(i, buf, sizeof(buf));
             if (*buf == '\0') {
@@ -1682,30 +2717,9 @@ cfg_prx_done(SHORT save)
             if (trusted_proxy_cidrs[i].addr != 0 || trusted_proxy_cidrs[i].mask != 0)
                 trusted_proxy_count++;
         cfg_save();
-        if (modmb != NULL) {
-            setmbk(modmb);
-            prfmsg(CFGSAV);
-            rstmbk();
-        }
     }
 
-    if (modmb != NULL) {
-        setmbk(modmb);
-        cfg_show_topmenu();
-        rstmbk();
-    }
-
-    usrptr->state  = cfgstt;
-    usrptr->substt = CFGSTT_MENU;
-
-    /* Absorb the spurious post-FSE sttrou call(s) -- see cfg_gen_done. */
-    if (usrnum >= 0 && usrnum < MAXNTERM)
-        absorb_count[usrnum] = 2;
-
-    if (pager_saved) {
-        usaptr->scnbrk = saved_scnbrk;
-        rstrxf();
-    }
+    cfg_finish_form(changed);
 }
 
 /*
@@ -1723,18 +2737,6 @@ cfg_wl1_vfy(INT fldno, CHAR *answer)
     if (*answer == '\0') return VFYOK;
     if (!parse_cidr(answer, &tmp)) { fsdouc('\7'); return VFYREJ; }
     return VFYOK;
-}
-
-/* Return to top-level config menu and restore sttrou state. */
-static VOID
-cfg_return_to_menu(VOID)
-{
-    if (modmb != NULL) { setmbk(modmb); cfg_show_topmenu(); rstmbk(); }
-    usrptr->state  = cfgstt;
-    usrptr->substt = CFGSTT_MENU;
-    /* Absorb the spurious post-FSE sttrou call(s) -- see cfg_gen_done. */
-    if (usrnum >= 0 && usrnum < MAXNTERM)
-        absorb_count[usrnum] = 2;
 }
 
 /*
@@ -1773,19 +2775,11 @@ cfg_launch_wl1(VOID)
 static VOID
 cfg_wl1_done(SHORT save)
 {
-    CHAR buf[24];
-    INT  i;
-    CHAR saved_scnbrk = 0;
-    GBOOL pager_saved = FALSE;
+    CHAR  buf[24];
+    INT   i;
+    GBOOL changed = (save && fsdscb->chgcnt > 0);
 
-    if (usaptr != NULL) {
-        saved_scnbrk = usaptr->scnbrk;
-        usaptr->scnbrk = CTNUOS;
-        rstrxf();
-        pager_saved = TRUE;
-    }
-
-    if (save && fsdscb->chgcnt > 0) {
+    if (changed) {
         for (i = 0; i < SNTIPCTL_MAX_WHITELIST; i++) {
             fsdfxt(i, buf, sizeof(buf));
             if (*buf == '\0') {
@@ -1796,15 +2790,153 @@ cfg_wl1_done(SHORT save)
             }
         }
         cfg_save();
-        if (modmb != NULL) { setmbk(modmb); prfmsg(CFGSAV); rstmbk(); }
     }
 
-    cfg_return_to_menu();
+    cfg_finish_form(changed);
+}
 
-    if (pager_saved) {
-        usaptr->scnbrk = saved_scnbrk;
-        rstrxf();
+/*
+ * cfg_geo_vfy
+ *
+ * FSE field verify callback for the GeoIP Location form.  Numeric ranges are
+ * enforced by the field's MIN/MAX spec; text fields accept any input.  DONE
+ * is delegated to vfyadn so SAVE/QUIT end the session.
+ */
+static INT
+cfg_geo_vfy(INT fldno, CHAR *answer)
+{
+    if (fldno == GEO_DONE) return vfyadn(fldno, answer);
+    return VFYOK;
+}
+
+/*
+ * cfg_launch_geo
+ *
+ * Starts a full-screen FSE session for the GeoIP Location form, pre-filled
+ * from the current settings.  cfg_geo_done() runs on save/quit.
+ */
+static VOID
+cfg_launch_geo(VOID)
+{
+    const CHAR *lvl, *prov;
+
+    if (snt_vda_sz <= 0 || modmb == NULL) return;
+
+    switch (geoip_loglevel) {
+    case GEOLOG_OFF:     lvl = "OFF";     break;
+    case GEOLOG_ERRORS:  lvl = "ERRORS";  break;
+    case GEOLOG_VERBOSE: lvl = "VERBOSE"; break;
+    default:             lvl = "NORMAL";  break;
     }
+    switch (geoip_provider) {
+    case GEOPRV_IPAPI:   prov = "IP-API.COM"; break;
+    case GEOPRV_IPAPICO: prov = "IPAPI.CO";   break;
+    default:             prov = "IPWHO.IS";   break;
+    }
+
+    setmbk(modmb);
+    fsdroom(SNTCFG_GEO, geo_fsp, 1);
+    sprintf(vdatmp, geo_fmt,
+            geoip_enabled ? "YES" : "NO",                        '\0',
+            geoip_split   ? "SPLIT" : "COMBINED",                '\0',
+            geoip_field,                                         '\0',
+            geoip_cty_field,                                     '\0',
+            (geoip_cty_fmt == GEOCF_CODE) ? "CODE" : "FULL",     '\0',
+            prov,                                                '\0',
+            geoip_host[0]   ? geoip_host   : "ipwho.is",         '\0',
+            geoip_key[0]    ? geoip_key    : "",                 '\0',
+            geoip_use_https ? "YES" : "NO",                      '\0',
+            geoip_timeout,                                       '\0',
+            (!geoip_cache_on) ? "OFF" : (geoip_cache_bytime ? "TIME" : "IP"), '\0',
+            geoip_cache_min,                                     '\0',
+            geoip_retries,                                       '\0',
+            lvl,                                                 '\0',
+            geoip_format[0] ? geoip_format : "{city}, {region}, {country}", '\0');
+    fsdapr(vdaptr, snt_vda_sz, vdatmp);
+    fsdbkg(fsdrft());
+    fsdego(cfg_geo_vfy, cfg_geo_done);
+    rstmbk();
+}
+
+/*
+ * cfg_geo_done
+ *
+ * FSE whndun callback for the GeoIP Location form.  Applies all field values
+ * to the live GeoIP variables and persists them to SNTIPCTL.DAT.  Restores
+ * the top-level config menu regardless of save/quit.
+ */
+static VOID
+cfg_geo_done(SHORT save)
+{
+    CHAR  buf[24];
+    INT   ord;
+    GBOOL changed = (save && fsdscb->chgcnt > 0);
+
+    if (changed) {
+        ord = fsdord(GEO_ENABLE);
+        geoip_enabled = (ord == 1) ? TRUE : FALSE;
+
+        ord = fsdord(GEO_WRITEMODE);          /* COMBINED(0)/SPLIT(1) */
+        geoip_split = (ord == GEOWM_SPLIT) ? TRUE : FALSE;
+
+        fsdfxt(GEO_FIELD, buf, sizeof(buf));
+        { INT v = atoi(buf); if (v >= 1 && v <= 5) geoip_field = v; }
+
+        fsdfxt(GEO_CTYFLD, buf, sizeof(buf));
+        { INT v = atoi(buf); if (v >= 1 && v <= 5) geoip_cty_field = v; }
+
+        ord = fsdord(GEO_CTYFMT);             /* FULL(0)/CODE(1) */
+        geoip_cty_fmt = (ord == GEOCF_CODE) ? GEOCF_CODE : GEOCF_FULL;
+
+        ord = fsdord(GEO_PROVIDER);           /* IPWHO.IS(0)/IP-API.COM(1)/IPAPI.CO(2) */
+        if (ord >= 0 && ord <= GEOPRV_IPAPICO) geoip_provider = ord;
+
+        fsdfxt(GEO_HOST, geoip_host, sizeof(geoip_host));
+        fsdfxt(GEO_KEY,  geoip_key,  sizeof(geoip_key));
+
+        ord = fsdord(GEO_HTTPS);              /* ALT=YES(0)/NO(1) */
+        geoip_use_https = (ord == 0) ? TRUE : FALSE;
+
+        /*
+         * HTTPS availability depends on the provider: ip-api.com's free tier is
+         * HTTP-only, so force HTTPS off there unless a paid API key is set (which
+         * unlocks the encrypted endpoint).  ipwho.is and ipapi.co support HTTPS
+         * on their free tiers, so their choice is left as the sysop set it.
+         */
+        if (geoip_provider == GEOPRV_IPAPI && geoip_key[0] == '\0')
+            geoip_use_https = FALSE;
+
+        fsdfxt(GEO_TIMEOUT, buf, sizeof(buf));
+        { INT v = atoi(buf); if (v >= 1 && v <= 60) geoip_timeout = v; }
+
+        ord = fsdord(GEO_CACHE);              /* OFF(0)/TIME(1)/IP(2) */
+        geoip_cache_on     = (ord != GEOCM_OFF);
+        geoip_cache_bytime = (ord == GEOCM_IP) ? FALSE : TRUE;
+
+        fsdfxt(GEO_CACHEDUR, buf, sizeof(buf));
+        { INT v = atoi(buf); if (v >= 1 && v <= 44640) geoip_cache_min = v; }
+
+        fsdfxt(GEO_RETRY, buf, sizeof(buf));
+        { INT v = atoi(buf); if (v >= 0 && v <= 5) geoip_retries = v; }
+
+        ord = fsdord(GEO_LOGLVL);             /* OFF/ERRORS/NORMAL/VERBOSE = 0..3 */
+        if (ord >= GEOLOG_OFF && ord <= GEOLOG_VERBOSE) geoip_loglevel = ord;
+
+        fsdfxt(GEO_FORMAT, geoip_format, sizeof(geoip_format));
+
+        if (geoip_host[0]   == '\0') stzcpy(geoip_host,   "ipwho.is",                    sizeof(geoip_host));
+        if (geoip_format[0] == '\0') stzcpy(geoip_format, "{city}, {region}, {country}", sizeof(geoip_format));
+
+        /* Make sure the GeoIP log folder exists if logging was just enabled. */
+        if (geoip_loglevel != GEOLOG_OFF) {
+            CreateDirectoryA("TOTALIPCONTROL", NULL);
+            CreateDirectoryA("TOTALIPCONTROL\\GEOIP LOGS", NULL);
+        }
+
+        cfg_save();
+    }
+
+    cfg_finish_form(changed);
 }
 
 /*
@@ -1820,7 +2952,7 @@ cfg_live_to_struct(VOID)
 
     setmem(&sntcfg, sizeof(sntcfg), 0);
     stzcpy(sntcfg.recid, "SNTIPCTL", sizeof(sntcfg.recid));
-    sntcfg.version     = 7;
+    sntcfg.version     = 9;
     sntcfg.proxy_trust = proxy_trust_enabled ? 'Y' : 'N';
     sntcfg.proxy_block = proxy_block_enabled ? 'Y' : 'N';
     for (i = 0; i < SNTIPCTL_MAX_TRUSTED; i++)
@@ -1833,6 +2965,24 @@ cfg_live_to_struct(VOID)
     stzcpy(sntcfg.bypass_key, bypass_key, sizeof(sntcfg.bypass_key));
     for (i = 0; i < SNTIPCTL_MAX_WHITELIST; i++)
         sntcfg.whitelist[i] = whitelist_cidrs[i];
+
+    /* GeoIP Location block (struct version 8). */
+    sntcfg.geoip_on       = geoip_enabled   ? 'Y' : 'N';
+    sntcfg.geoip_fld      = geoip_field;
+    sntcfg.geoip_provider = (CHAR)geoip_provider;
+    sntcfg.geoip_https    = geoip_use_https ? 'Y' : 'N';
+    sntcfg.geoip_timeout  = geoip_timeout;
+    sntcfg.geoip_cache_on = geoip_cache_on  ? 'Y' : 'N';
+    sntcfg.geoip_cache_min = geoip_cache_min;
+    sntcfg.geoip_retry    = geoip_retries;
+    sntcfg.geoip_loglvl   = (CHAR)geoip_loglevel;
+    stzcpy(sntcfg.geoip_host,   geoip_host,   sizeof(sntcfg.geoip_host));
+    stzcpy(sntcfg.geoip_key,    geoip_key,    sizeof(sntcfg.geoip_key));
+    stzcpy(sntcfg.geoip_format, geoip_format, sizeof(sntcfg.geoip_format));
+    sntcfg.geoip_split   = geoip_split ? 'Y' : 'N';
+    sntcfg.geoip_cty_fld = geoip_cty_field;
+    sntcfg.geoip_cty_fmt = (CHAR)geoip_cty_fmt;
+    sntcfg.geoip_cache_bytime = geoip_cache_bytime ? 'Y' : 'N';
 }
 
 /*
@@ -1865,6 +3015,37 @@ cfg_struct_to_live(VOID)
     for (i = 0; i < SNTIPCTL_MAX_TRUSTED; i++)
         if (trusted_proxy_cidrs[i].addr != 0 || trusted_proxy_cidrs[i].mask != 0)
             trusted_proxy_count++;
+
+    /* GeoIP Location block (struct version 8), with range/default guards. */
+    geoip_enabled   = (sntcfg.geoip_on == 'Y') ? TRUE : FALSE;
+    if (sntcfg.geoip_fld >= 1 && sntcfg.geoip_fld <= 5)
+        geoip_field = sntcfg.geoip_fld;
+    if (sntcfg.geoip_provider >= 0 && sntcfg.geoip_provider <= GEOPRV_IPAPICO)
+        geoip_provider = sntcfg.geoip_provider;
+    geoip_use_https = (sntcfg.geoip_https == 'Y') ? TRUE : FALSE;
+    if (sntcfg.geoip_timeout >= 1 && sntcfg.geoip_timeout <= 60)
+        geoip_timeout = sntcfg.geoip_timeout;
+    geoip_cache_on  = (sntcfg.geoip_cache_on == 'Y') ? TRUE : FALSE;
+    if (sntcfg.geoip_cache_min >= 1 && sntcfg.geoip_cache_min <= 44640)
+        geoip_cache_min = sntcfg.geoip_cache_min;
+    if (sntcfg.geoip_retry >= 0 && sntcfg.geoip_retry <= 5)
+        geoip_retries = sntcfg.geoip_retry;
+    if (sntcfg.geoip_loglvl >= GEOLOG_OFF && sntcfg.geoip_loglvl <= GEOLOG_VERBOSE)
+        geoip_loglevel = sntcfg.geoip_loglvl;
+    stzcpy(geoip_host,   sntcfg.geoip_host,   sizeof(geoip_host));
+    stzcpy(geoip_key,    sntcfg.geoip_key,    sizeof(geoip_key));
+    stzcpy(geoip_format, sntcfg.geoip_format, sizeof(geoip_format));
+    if (geoip_host[0]   == '\0') stzcpy(geoip_host,   "ipwho.is",                    sizeof(geoip_host));
+    if (geoip_format[0] == '\0') stzcpy(geoip_format, "{city}, {region}, {country}", sizeof(geoip_format));
+
+    geoip_split = (sntcfg.geoip_split == 'Y') ? TRUE : FALSE;
+    if (sntcfg.geoip_cty_fld >= 1 && sntcfg.geoip_cty_fld <= 5)
+        geoip_cty_field = sntcfg.geoip_cty_fld;
+    if (sntcfg.geoip_cty_fmt == GEOCF_FULL || sntcfg.geoip_cty_fmt == GEOCF_CODE)
+        geoip_cty_fmt = sntcfg.geoip_cty_fmt;
+    /* Cache mode: only 'N' means per-IP; anything else (incl. a zeroed byte
+     * from a pre-v9 record) means the historical time-based expiry. */
+    geoip_cache_bytime = (sntcfg.geoip_cache_bytime == 'N') ? FALSE : TRUE;
 }
 
 /*
@@ -1921,13 +3102,62 @@ cfg_load(VOID)
 
     dfaSetBlk(sntbt);
     if (dfaAcqEQ(&sntcfg, &sntcfg, 0)) {
-        if (sntcfg.version == 7) {
+        if (sntcfg.version == 9) {
             cfg_struct_to_live();
             shocst("Total IP Control", "settings loaded from SNTIPCTL.DAT");
+        } else if (sntcfg.version == 7 || sntcfg.version == 8) {
+            /*
+             * Forward-migrate a version 7 or 8 record.  Each newer block was
+             * appended after the previous layout (carved from the old spare
+             * area), so an older record is a byte-compatible prefix of version 9
+             * -- every existing field sits at the same offset.  We therefore
+             * PRESERVE all existing settings via cfg_struct_to_live() (bytes that
+             * did not exist in the old version read as zero and are ignored by
+             * the range guards), then apply defaults for the blocks that record
+             * did not have, and rewrite it as version 9.
+             */
+            cfg_struct_to_live();
+
+            if (sntcfg.version == 7) {
+                /* v7 predates the whole GeoIP block -- default it. */
+                geoip_enabled   = FALSE;
+                geoip_field     = 3;
+                geoip_provider  = GEOPRV_IPWHOIS;
+                geoip_use_https = TRUE;
+                geoip_timeout   = 5;
+                geoip_cache_on  = TRUE;
+                geoip_cache_min = 1440;
+                geoip_retries   = 1;
+                geoip_loglevel  = GEOLOG_NORMAL;
+                stzcpy(geoip_host,   "ipwho.is",                    sizeof(geoip_host));
+                geoip_key[0] = '\0';
+                stzcpy(geoip_format, "{city}, {region}, {country}", sizeof(geoip_format));
+            }
+
+            /*
+             * The split write-mode block is new in v9.  Choose the default that
+             * PRESERVES each record's existing behavior:
+             *   - v7 predates GeoIP (disabled, never wrote a field), so the new
+             *     SPLIT default is fine -- it only takes effect once the Sysop
+             *     enables and configures GeoIP.
+             *   - v8 already wrote the whole location into a SINGLE field.
+             *     Defaulting it to SPLIT would begin writing the country into a
+             *     second field (Address 4) and alter the first field on the next
+             *     login, so keep it COMBINED to preserve the prior behavior.
+             */
+            geoip_split        = (sntcfg.version == 7) ? TRUE : FALSE;
+            geoip_cty_field    = 4;
+            geoip_cty_fmt      = GEOCF_FULL;
+            geoip_cache_bytime = TRUE;      /* new in v9 -- historical time mode */
+
+            dfaDelete();
+            cfg_live_to_struct();
+            dfaInsertV(&sntcfg, (USHORT)sizeof(sntcfg));
+            shocst("Total IP Control", "settings migrated to v1.1.0 -- existing settings preserved");
         } else {
             /*
-             * Record exists but was written by an older build with a different
-             * struct layout.  Delete it and insert fresh defaults.
+             * Record exists but was written by an incompatible older build.
+             * Delete it and insert fresh defaults.
              */
             dfaDelete();
             cfg_live_to_struct();
@@ -1974,7 +3204,7 @@ sntipctl_gbl(VOID)
         rstmbk();
         shocst("Total IP Control",
                "ERROR: /TOTALIP unavailable -- SNTIPCTL.MCV is stale. "
-               "Redeploy SNTIPCTL.MSG and rerun GCNF, then restart the BBS.");
+               "Redeploy SNTIPCTL.MSG and restart the BBS.");
         return 1;
     }
 
@@ -1997,7 +3227,7 @@ sntipctl_gbl(VOID)
      * for real user input.  absorb_count causes sttrou to swallow those
      * spurious "/" and "" calls so the menu is not re-rendered.
      */
-    cfg_show_topmenu();
+    cfg_show_topmenu(0);
     if (usrnum >= 0 && usrnum < MAXNTERM)
         absorb_count[usrnum] = 2;
 
@@ -2111,14 +3341,48 @@ gw_has_bypass_key(const CHAR *bypass)
 }
 
 /*
+ * gw_other_has_bypass_key
+ *
+ * Returns TRUE if the user on channel `channel` holds any key from the
+ * comma-separated bypass list.  Uses gen_haskey() (LOCKNKEY.H) which checks
+ * keys for any channel, not just the current one.
+ *
+ * Called by count_ip_in_mod to exclude bypass-key holders from the session
+ * count.  A user who bypassed the limit when they entered should not consume
+ * a slot that counts against non-bypass users from the same IP.
+ */
+static GBOOL
+gw_other_has_bypass_key(INT channel, const CHAR *bypass)
+{
+    CHAR  list[GW_BYPASS_MAXSIZ];
+    CHAR *tok;
+
+    stzcpy(list, bypass, sizeof(list));
+    tok = strtok(list, ",");
+    while (tok != NULL) {
+        tok = (CHAR *)skptwht(tok);
+        unpad(tok);
+        if (*tok != '\0' && gen_haskey(tok, channel, usroff(channel)))
+            return TRUE;
+        tok = strtok(NULL, ",");
+    }
+    return FALSE;
+}
+
+/*
  * count_ip_in_mod
  *
  * Returns the number of active (ACTUSR) sessions from user_ip currently
  * inside the module identified by target_state, excluding the current
- * channel.
+ * channel and any sessions whose user holds a bypass key.
+ *
+ * Bypass-key holders are excluded because they entered without consuming a
+ * slot -- their presence must not count against non-bypass users from the
+ * same IP (otherwise the sysop entering first would reduce the effective
+ * limit for everyone else).
  */
 static INT
-count_ip_in_mod(ULONG user_ip, INT target_state)
+count_ip_in_mod(ULONG user_ip, INT target_state, const CHAR *bypass)
 {
     INT i, count = 0;
     for (i = 0; i < hichp1; i++) {
@@ -2126,6 +3390,7 @@ count_ip_in_mod(ULONG user_ip, INT target_state)
         if (usroff(i)->usrcls != ACTUSR)                    continue;
         if (usroff(i)->state  != target_state)              continue;
         if ((*pp_tcpipinf)[i].inaddr.s_addr != user_ip)    continue;
+        if (gw_other_has_bypass_key(i, bypass))             continue;
         count++;
     }
     return count;
@@ -2249,7 +3514,7 @@ sntipctl_gateway(VOID)
     }
 
     user_ip = (*pp_tcpipinf)[usrnum].inaddr.s_addr;
-    ipcount = count_ip_in_mod(user_ip, modnum);
+    ipcount = count_ip_in_mod(user_ip, modnum, bypass);
 
     if (ipcount < maxip) {
         if (rawmsg(IPGGNT) != NULL && *rawmsg(IPGGNT) != '\0') {
@@ -2305,6 +3570,20 @@ sntipctl_stt(VOID)
 
     case CFGSTT_MENU:
         /*
+         * Re-assert continuous output every editor cycle.  The menu is
+         * transmitted asynchronously by the poll loop, so if the FSD teardown
+         * (or anything else) left scnbrk at the user's paged screen length, the
+         * next redraw could raise a "(N)onstop,Q,C?" prompt.  Pinning CTNUOS
+         * here -- in addition to editor_pager_suppress() on entry -- guarantees
+         * paging stays off for the whole session (restored on X/Q exit).
+         */
+        if (usaptr != NULL && usrnum >= 0 && usrnum < MAXNTERM &&
+            editor_pager_off[usrnum]) {
+            usaptr->scnbrk = CTNUOS;
+            rstrxf();
+        }
+
+        /*
          * Absorb spurious "/" and empty inputs MBBS delivers immediately after
          * globalcmd returns 1.  Only "/" and empty are swallowed; real user
          * keystrokes ("1", "X", etc.) bypass the counter so they are not lost.
@@ -2320,12 +3599,12 @@ sntipctl_stt(VOID)
         }
 
         if (!margc || margv[0] == NULL || *margv[0] == '\0') {
-            /* Empty input: user pressed Enter to re-display the menu. */
-            if (modmb != NULL) {
-                setmbk(modmb);
-                cfg_show_topmenu();
-                rstmbk();
-            }
+            /*
+             * Empty input -- a stray Enter, or a spurious empty call delivered
+             * past the absorb counter.  Do nothing rather than repaint the whole
+             * menu (which clears the screen), so the display is not needlessly
+             * redrawn.  The menu is already on screen from the last real draw.
+             */
             return 1;
         }
         inp = margv[0];
@@ -2339,11 +3618,11 @@ sntipctl_stt(VOID)
         if (sameas(inp, "1")) { cfg_launch_gen(); outprf(usrnum); return 1; }
         if (sameas(inp, "2")) { cfg_launch_prx(); outprf(usrnum); return 1; }
         if (sameas(inp, "3")) { cfg_launch_wl1(); outprf(usrnum); return 1; }
+        if (sameas(inp, "4")) { cfg_launch_geo(); outprf(usrnum); return 1; }
 
         if (modmb != NULL) {
             setmbk(modmb);
-            prfmsg(CFGBAD);
-            cfg_show_topmenu();
+            cfg_show_topmenu(CFGBAD);   /* menu with an "invalid input" banner */
             rstmbk();
         }
         return 1;

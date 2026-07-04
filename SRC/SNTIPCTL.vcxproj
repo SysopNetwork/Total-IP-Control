@@ -75,7 +75,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(MBBS_SDK_DIR)\lib\importlibs;$(MBBS_SDK_DIR)\lib\v10</AdditionalLibraryDirectories>
-      <AdditionalDependencies>wgserver_lib.lib;galgsbl_lib.lib;ws2_32.lib</AdditionalDependencies>
+      <AdditionalDependencies>wgserver_lib.lib;galgsbl_lib.lib;ws2_32.lib;winhttp.lib</AdditionalDependencies>
       <ModuleDefinitionFile>$(ProjectDir)SNTIPCTL_EXP.DEF</ModuleDefinitionFile>
       <OptimizeReferences>false</OptimizeReferences>
       <EnableCOMDATFolding>false</EnableCOMDATFolding>
@@ -101,7 +101,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(MBBS_SDK_DIR)\lib\importlibs;$(MBBS_SDK_DIR)\lib\v10</AdditionalLibraryDirectories>
-      <AdditionalDependencies>wgserver_lib.lib;galgsbl_lib.lib;ws2_32.lib</AdditionalDependencies>
+      <AdditionalDependencies>wgserver_lib.lib;galgsbl_lib.lib;ws2_32.lib;winhttp.lib</AdditionalDependencies>
       <ModuleDefinitionFile>$(ProjectDir)SNTIPCTL_EXP.DEF</ModuleDefinitionFile>
       <!-- Embed only the PDB file name, not the full local build path. -->
       <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>

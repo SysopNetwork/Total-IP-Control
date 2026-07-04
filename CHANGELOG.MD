@@ -2,6 +2,66 @@
 
 All notable changes to Total IP Control are documented here.
 
+## [1.1.0] — 2026-07-04
+
+### Added
+
+- **GeoIP Location** — Looks up each caller's approximate City / State / Country
+  from their IP address at login and stores it in configurable user-profile
+  field(s).  US states are stored as the standard two-letter abbreviation;
+  locations elsewhere use the most appropriate subdivision plus country.
+
+  - **Write modes** — *Split* (default) stores the city/state and the country in
+    two separate fields (city/state → Address 3, country → Address 4 by default);
+    *Combined* stores the whole location in one field.  A **country format**
+    option renders the country as its full name (`United States`) or two-letter
+    code (`US`).
+
+  - **Non-blocking by design.** Lookups run on a dedicated background worker
+    thread and results are applied on the main thread by a once-per-second
+    `rtkick()` drain, so login is never delayed and a failed, slow, or
+    unreachable provider can never prevent a user from logging in.
+  - **Per-IP caching** with selectable **cache mode** — *TIME* (re-look-up after
+    a configurable duration, default 24 hours), *IP* (a known IP is never looked
+    up again while the BBS is up; minimizes API calls), or *OFF*.  Private,
+    loopback, and reserved IP ranges are never looked up.
+  - **Provider abstraction** — Ships with **ipwho.is** as the default provider
+    (keyless free tier, HTTPS, dedicated two-letter US state field); the request
+    builder and response parser are structured so further providers can be added
+    without reworking the module.
+  - **Configurable** via a new **GeoIP Location** form in the `/TOTALIP` editor:
+    enable/disable, write mode, city/state field, country field, country format,
+    provider, API host, API key, HTTPS, timeout, cache mode and duration, retry
+    count, log level, and a location format template (`{city}`, `{region}`,
+    `{country}`, `{cc}` tokens).  The provider is selected by cycling with the
+    space bar, and HTTPS is adjusted automatically for providers whose free tier
+    is HTTP-only.
+  - **Logging** — A dedicated `TOTALIPCONTROL\GEOIP LOGS\` folder with its own
+    OFF / ERRORS / NORMAL / VERBOSE verbosity control records successful lookups,
+    failures, API errors, rate limiting, and cache activity.
+
+### Changed
+
+- Settings record format advanced to version 9 to hold the GeoIP configuration.
+  A version 7 settings file (from 1.0.0) is migrated automatically on first
+  start with **all existing settings preserved** — the GeoIP options are added
+  with default values and the feature starts disabled.
+- The `/TOTALIP` editor now presents four forms (GeoIP Location added), with a
+  consistent layout across every form.
+
+## [1.0.0] — 2026-06-29
+
+### Fixed
+
+- **Gateway bypass-key sessions no longer count against the per-IP limit for
+  other users.** When a user holding a bypass key (e.g., Sysop) entered a
+  gateway-protected module first, their session was counted by the IP check
+  applied to subsequent users from the same IP. This caused the limit to appear
+  one slot lower than configured for non-bypass users, blocking a legitimate
+  connection that should have been allowed. Bypass-key holders' sessions are now
+  excluded from the count via `gen_haskey()`, matching the intent that bypass
+  keys skip the limit entirely rather than just skip the check at entry time.
+
 ## [1.0.0] — 2026-06-22
 
 ### Added

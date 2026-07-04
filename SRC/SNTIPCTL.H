@@ -48,6 +48,10 @@
 /* Placed after the FSE forms so adding it does not renumber slots 1-12.   */
 #define PRXBLK      13   /* "Direct connection refused" (require-proxy)     */
 
+/* ---- GeoIP Location FSE form (v1.1.0) ---- */
+/* Appended after PRXBLK so existing slots 1-13 are never renumbered.      */
+#define SNTCFG_GEO  14   /* GeoIP Location settings FSE form               */
+
 /*
  * FSE field numbers -- General Settings form (SNTCFG_GEN).
  * Fields are numbered 0-based in declaration order from gen_fsp[].
@@ -83,6 +87,57 @@
 #define WL_WL9      8    /* Whitelist CIDR #9                              */
 #define WL_WL10     9    /* Whitelist CIDR #10                             */
 #define WL_DONE     10   /* Action selector (ALT=SAVE/QUIT)                */
+
+/*
+ * FSE field numbers -- GeoIP Location form (SNTCFG_GEO).
+ * Order must match geo_fsp[] / geo_fmt[] in SNTIPCTL.C and the field marker
+ * runs in the SNTCFG_GEO template.
+ */
+#define GEO_ENABLE    0  /* GeoIP lookups on/off (ALT=NO/YES)             */
+#define GEO_WRITEMODE 1  /* COMBINED (one field) vs SPLIT (city/state + country) */
+#define GEO_FIELD     2  /* City/State field (MIN=1 MAX=5)                */
+#define GEO_CTYFLD    3  /* Country field, SPLIT mode (MIN=1 MAX=5)       */
+#define GEO_CTYFMT    4  /* Country format (ALT=FULL/CODE)               */
+#define GEO_PROVIDER  5  /* GeoIP provider (ALT=IPWHO.IS/IP-API.COM/IPAPI.CO) */
+#define GEO_HOST      6  /* API host name (text)                          */
+#define GEO_KEY       7  /* API key/token, blank for keyless free tier    */
+#define GEO_HTTPS     8  /* Use HTTPS (ALT=YES/NO)                        */
+#define GEO_TIMEOUT   9  /* Per-request timeout seconds (MIN=1 MAX=60)    */
+#define GEO_CACHE    10  /* Cache mode (ALT=OFF/TIME/IP)                  */
+#define GEO_CACHEDUR 11  /* Cache duration in minutes (MIN=1 MAX=44640)   */
+#define GEO_RETRY    12  /* Retries on failed lookup (MIN=0 MAX=5)        */
+#define GEO_LOGLVL   13  /* Log level (ALT=OFF/ERRORS/NORMAL/VERBOSE)     */
+#define GEO_FORMAT   14  /* Location format template (text)               */
+#define GEO_DONE     15  /* Action selector (ALT=SAVE/QUIT)               */
+
+/* GeoIP provider identifiers (stored in config). */
+#define GEOPRV_IPWHOIS  0  /* ipwho.is / ipwhois.io (default)             */
+#define GEOPRV_IPAPI    1  /* ip-api.com                                  */
+#define GEOPRV_IPAPICO  2  /* ipapi.co                                    */
+
+/* GeoIP location write mode (stored in config). */
+#define GEOWM_COMBINED  0  /* whole location string in one field          */
+#define GEOWM_SPLIT     1  /* city/state in one field, country in another */
+
+/* GeoIP country rendering (stored in config). */
+#define GEOCF_FULL      0  /* full country name, e.g. "United States"     */
+#define GEOCF_CODE      1  /* two-letter ISO code, e.g. "US"              */
+
+/*
+ * GeoIP cache mode (chosen on the form; stored as two flags -- see
+ * geoip_cache_on / geoip_cache_bytime).  OFF = no caching; TIME = cache and
+ * re-look-up after the cache duration expires; IP = cache per IP for the BBS
+ * uptime so a repeat IP is never looked up again (the duration is ignored).
+ */
+#define GEOCM_OFF       0  /* caching disabled                            */
+#define GEOCM_TIME      1  /* time-based expiry (cache duration)          */
+#define GEOCM_IP        2  /* per-IP, no time expiry                      */
+
+/* GeoIP log verbosity levels (stored in config). */
+#define GEOLOG_OFF      0  /* no GeoIP logging                            */
+#define GEOLOG_ERRORS   1  /* API errors / rate limiting / failures only  */
+#define GEOLOG_NORMAL   2  /* + successful lookups and profile updates    */
+#define GEOLOG_VERBOSE  3  /* + cache hits/misses and enqueue activity    */
 
 /*
  * Sub-states for the online config editor sttrou (stored in usrptr->substt).

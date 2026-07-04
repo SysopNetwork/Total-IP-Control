@@ -14,6 +14,10 @@ hooks into the TCP/IP layer at startup:
    Import Address Table so the PROXY header is consumed before GALTNTD reads
    any application data, without polling or sleeping.
 
+It also starts a **background worker thread** and a once-per-second `rtkick()`
+routine for GeoIP location lookups (see *GeoIP Location* below), so blocking
+network I/O never runs on the main scheduler thread.
+
 All features share one configuration record and one lifecycle.
 
 ---
@@ -32,17 +36,20 @@ All features share one configuration record and one lifecycle.
    (`dclvda`).
 5. Apply built-in defaults (all features off), then `cfg_load()` to read the
    saved settings record from `SNTIPCTL.DAT`.
-6. Create the audit-log directory tree if logging is enabled.
+6. Create the audit-log directory tree if logging is enabled, and the
+   `GEOIP LOGS\` folder if GeoIP logging is enabled.
 7. Resolve `_tcpipinf` at runtime from `GALTCPIP.DLL` via `GetProcAddress`
    (avoids link-time ordinal dependencies).
 8. Save and replace `hdlcon`.
 9. Patch `recv()` in `GALTNTD.DLL`'s IAT (falls back to `GALTCPIP.DLL` if
    GALTNTD is unavailable, and to a single non-blocking check if no patch slot
    is found).
-10. Register the `/TOTALIP` global command handler (`globalcmd`).
+10. `geoip_start()` — create the GeoIP worker thread and its signalling events,
+    and arm the once-per-second result-drain `rtkick()`.
+11. Register the `/TOTALIP` global command handler (`globalcmd`).
 
-`SNTIPCTL` **must** appear after `GALTNTD` in `wgserv.cfg`. If `hdlcon` is NULL
-at init, proxy detection cannot be installed and a fatal warning is logged.
+If `hdlcon` is NULL at init (because `GALTNTD` has not yet loaded), proxy
+detection cannot be installed and a fatal warning is logged.
 
 ---
 
@@ -204,6 +211,136 @@ A dotted-decimal IPv4 address is at most 15 characters and fits any of these.
 
 ---
 
+## GeoIP Location
+
+GeoIP resolves a caller's approximate City / State / Country from their IP
+address and stores it in one or two configurable profile fields (see *Write
+modes* below). Because the BBS runs a single cooperative scheduler thread, an
+HTTP request (which can take seconds) must never run on that thread. The
+subsystem is therefore split across a background worker and the main thread.
+
+### Threading model
+
+```
+  main thread (logon)            worker thread              main thread (rtkick, 1/sec)
+  ------------------             -------------              ---------------------------
+  geoip_enqueue()                geoip_worker()             geoip_drain()
+    skip private IP                pop request               pop result
+    cache hit -> apply             WinHttp GET (blocking)    geo_cache_store()
+    else snapshot req  --queue-->  parse JSON       --queue--> geoip_apply()
+        SetEvent(work)             push result                  updaccu(uacoff(ch))
+```
+
+- **`geoip_enqueue()` (main thread, from `sntipctl_logon`)** — Skips private,
+  loopback, and reserved IPs. On a cache hit it applies the stored location
+  immediately. Otherwise it builds a **self-contained request snapshot**
+  (`struct geo_req`: channel, IP, userid, host, path, HTTPS flag, timeout,
+  provider, retries), pushes it onto a `CRITICAL_SECTION`-guarded queue, and
+  signals the worker. It returns instantly — login is never delayed.
+
+- **`geoip_worker()` (background thread)** — Waits on the work/stop events, pops
+  a request, performs one blocking WinHTTP GET (`geoip_http_get`) with optional
+  retries, parses the response into location **components** (`geoip_parse_body`
+  fills a `struct geo_loc`: city, region, country, country code), and pushes a
+  `struct geo_res` back. Formatting is deliberately *not* done here — it happens
+  on the main thread at apply time, so the current write-mode / format settings
+  always apply. **The worker calls no Major BBS SDK function** — it
+  reads only the inert request snapshot, never a live BBS global (`usrnum`,
+  `usaptr`, `tcpipinf`, …), which the engine reuses the instant a channel hangs
+  up. Its only outward action is file logging via `geoip_log()`, which is
+  CRT/`fopen`-based and guarded by the shared `log_cs`.
+
+- **`geoip_drain()` (main thread, `rtkick` once per second)** — The only place a
+  result re-enters the BBS. It pops results, updates the per-IP cache, and calls
+  `geoip_apply()`, which formats the components (`geo_format`) and writes them to
+  the profile field(s) per the write mode (`geo_set_field`), then persists once
+  with `updaccu(uacoff(channel))` if anything changed — after re-checking the
+  channel still holds the **same userid** that requested the lookup, so a
+  recycled channel is never written to the wrong user. `updaccu()` persists a
+  record keyed by its userid
+  and touches no per-user globals, which is required here because a `rtkick`
+  routine runs with no current-user context. The drain re-arms itself each
+  second unless shutdown has cleared `geo_started`.
+
+### HTTP client
+
+`geoip_http_get()` uses WinHTTP (`winhttp.lib`). Every leg (resolve / connect /
+send / receive) is bounded by the configured timeout via `WinHttpSetTimeouts`,
+and the read loop bails out if the stop event is signalled, so the worker (and
+shutdown) can never block indefinitely. The HTTP status code is read so that
+`429` (rate limiting) and other errors are logged distinctly. HTTPS is used
+unless disabled; WinHTTP performs TLS transparently.
+
+### Caching
+
+`geo_cache_lookup()` / `geo_cache_store()` maintain a fixed table of
+`{ IP, expiry, location components }` entries (the raw `struct geo_loc`, not a
+formatted string, so a write-mode change needs no re-lookup), accessed **only
+from the main thread**
+(enqueue and drain), so no lock is needed. Entries are reused by IP, then by
+empty/expired slot, then round-robin.
+
+The **cache mode** (`geoip_cache_on` + `geoip_cache_bytime`) selects expiry:
+
+- **TIME** — `expiry = GetTickCount64() + duration`; a lookup past that time
+  misses and re-queries. The historical behavior and the default.
+- **IP** — `expiry = (ULONGLONG)-1` (never expires), so a known IP is never
+  re-queried while the BBS is up; only an unseen IP triggers a lookup. The
+  duration is ignored.
+- **OFF** — caching is skipped entirely (`geoip_cache_on == FALSE`).
+
+### Provider abstraction
+
+Two functions form the provider seam:
+
+- `geoip_build_url(provider, ip, …)` — builds the host and request path.
+- `geoip_parse_body(provider, body, struct geo_loc *out)` — validates the
+  provider's success indicator and extracts city / region / country / country
+  code into `out`, choosing the US two-letter state code (or the full
+  subdivision name elsewhere) for the region. It does **not** format — the
+  main-thread `geo_format()` does that at apply time.
+
+Adding a provider is a matter of adding a `case` to each. Three are wired up:
+**ipwho.is** (`GEOPRV_IPWHOIS`, the default), **ip-api.com** (`GEOPRV_IPAPI`),
+and **ipapi.co** (`GEOPRV_IPAPICO`). ipwho.is's keyless free tier returns a
+dedicated two-letter `region_code`, `country_code`, and a `success` flag over
+HTTPS. ip-api.com's free tier is HTTP-only, so `geoip_use_https` is forced off
+for it unless a paid key is set.
+
+### Format template
+
+The stored string is assembled from a template with `{city}`, `{region}`,
+`{country}`, and `{cc}` tokens (default `{city}, {region}, {country}`).
+`{region}` resolves to the US two-letter state code when the country is `US`,
+otherwise the full subdivision name. Empty pieces are removed (`geo_join_clean`)
+so the result never contains stray separators.
+
+### Write modes
+
+`geoip_apply()` honours a write mode (`geoip_split`):
+
+- **SPLIT (default)** — `geo_format(fmt, L, inc_country=FALSE, …)` renders the
+  city/state (the `{country}`/`{cc}` tokens expand to empty) into `geoip_field`,
+  and the country — full name or two-letter code per `geoip_cty_fmt` — goes into
+  `geoip_cty_field`. Defaults: city/state → Address 3, country → Address 4. If
+  the two field numbers collide, the country write is skipped so it cannot
+  clobber the city/state value.
+- **COMBINED** — `geo_format(fmt, L, inc_country=TRUE, …)` renders the whole
+  location (country included per the template) into the single `geoip_field`.
+
+Each field is written through `geo_set_field()`, which copies only when the
+stored value actually differs and reports whether it changed; a single
+`updaccu()` then persists the record if any field changed.
+
+### Shutdown
+
+`geoip_stop()` (called first in `finrou`) clears `geo_started` (stopping the
+drain re-arm), signals the stop event, **joins the worker thread**
+(`WaitForSingleObject`) so the DLL is never unloaded while the thread runs, then
+closes the events and deletes the critical section.
+
+---
+
 ## Audit Logging
 
 When enabled, daily log files are written under `TOTALIPCONTROL\`, split into
@@ -214,6 +351,12 @@ three folders:
 | `PROXCLIP LOGS\` | Proxy header processing, untrusted-source rejections, profile IP writes |
 | `DENIED CONNECTIONS\` | Per-IP connection-limit refusals (connect time and login) |
 | `DENIED MODULE ACCESS\` | Per-module gateway denials |
+| `GEOIP LOGS\` | GeoIP lookups, cache activity, API errors, rate limiting, profile updates |
+
+The first three folders follow the global **Audit logging** flag. `GEOIP LOGS\`
+is governed independently by the GeoIP **Log level** (OFF / ERRORS / NORMAL /
+VERBOSE); `geoip_log()` writes it directly (also under `log_cs`) so worker-thread
+and main-thread GeoIP events are serialized safely.
 
 Paths are relative to the BBS root (the process working directory). Files are
 named `YYYY-MM-DD.LOG`. Each entry is one line:
@@ -240,22 +383,32 @@ pager for the whole session, and displays the top menu.
 `sntipctl_stt()` (the `sttrou` state-input routine) drives the editor:
 
 - `substt == 0` — entered from a BBS menu item; runs the per-module gateway.
-- `CFGSTT_MENU` — top-level menu. `1`/`2`/`3` launch full-screen (FSE) forms;
+- `CFGSTT_MENU` — top-level menu. `1`/`2`/`3`/`4` launch full-screen (FSE) forms;
   `X`/`Q` restores the pager and exits via `condex()`.
 
-The three FSE forms are **General Settings**, **Trusted Proxy IP/CIDRs**
-(2 entries), and **Connection Limit Whitelist** (10 entries). Each form's done
-callback applies its fields to the live variables, persists them with
-`cfg_save()`, and returns to the menu.
+The four FSE forms are **General Settings**, **Trusted Proxy IP/CIDRs**
+(2 entries), **Connection Limit Whitelist** (10 entries), and **GeoIP Location**.
+All four share a uniform layout — the same header, the same `Action:` / error
+footer, and field markers aligned to a common column. Each form's done callback
+applies its fields to the live variables and persists them with `cfg_save()`.
 
-Two interaction details:
+Three interaction details:
 
-- **Pager suppression** is applied once for the editor session (`scnbrk` set to
-  the continuous-output sentinel on entry, restored on exit), rather than around
-  each screen, so paging never interrupts a form or the menu.
+- **Pager suppression.** The editor sets `scnbrk` to the continuous-output
+  sentinel `CTNUOS` for the whole session (on `/TOTALIP` entry) and restores the
+  user's real screen length only on exit. Channel output is transmitted
+  asynchronously by the poll loop, so `cfg_show_topmenu()` — which draws the
+  header/banner/menu — keeps `scnbrk` pinned to `CTNUOS` while the editor owns
+  the pager (rather than restoring a value the FSD teardown may have left paged),
+  which is what prevents a `(N)onstop,Q,C?` prompt when the menu redraws after a
+  form closes.
+- **Menu redraw on form close.** Each form's done callback (`cfg_finish_form`)
+  redraws the top menu immediately, optionally with a one-line "settings saved"
+  banner printed *after* the screen-clearing header so it is not wiped (and does
+  not flash on a separate screen).
 - **Spurious input absorption** (`absorb_count`) swallows the empty/`/` input
   the BBS delivers immediately after a global command or a full-screen form
-  closes, preventing duplicate redraws.
+  closes, so a real keystroke is never lost and the menu is not redrawn twice.
 
 ---
 
@@ -266,15 +419,26 @@ Two interaction details:
 Settings are stored in a single 512-byte Btrieve record keyed by `"SNTIPCTL"`,
 created automatically on first run via `dfaCreateSpec` (guarded by a
 file-existence check to avoid a spurious create error on restart). The record
-carries a layout-version byte; if a record written by an incompatible version is
-found, it is deleted and re-created with defaults.
+carries a layout-version byte (currently **9**). A compile-time assertion keeps
+`sizeof(struct sntipctlcfg)` pinned at 512 bytes as fields are added.
 
 The record holds: trusted-proxy enable flag and two CIDRs, require-trusted-proxy
 flag, connection-limit enable flag and maximum, audit-logging flag, profile-IP
-enable flag and field number, bypass key name, and ten whitelist CIDRs.
+enable flag and field number, bypass key name, ten whitelist CIDRs, the GeoIP
+block (enable flag, city/state field number, provider, HTTPS flag, timeout,
+cache flag and duration, retry count, log level, host, key, and format
+template), and the version-9 write-mode block (split flag, country field number,
+country format).
 
-`cfg_load()` reads the record at init; `cfg_save()` writes it when an editor form
-is saved. Changes are live immediately and persist across restarts.
+Each block was appended after the previous version's fields (carved from the old
+spare area), so an older record is a byte-compatible prefix of the current
+layout. `cfg_load()` therefore **migrates a version 7 or 8 record in place with
+all existing settings preserved** — it loads them, applies defaults only for the
+blocks that record lacked (the whole GeoIP block for v7; the write-mode block for
+both v7 and v8), and rewrites the record as version 9. A record from an
+incompatible older version is replaced with defaults. `cfg_save()` writes the
+record when an editor form is saved; changes are live immediately and persist
+across restarts.
 
 ### `SNTIPCTL.MCV` (read-only at runtime)
 
@@ -292,10 +456,13 @@ packaging time. See `BUILDING.MD`.
 
 `sntipctl_fin()` (the `finrou`) runs at BBS shutdown:
 
-1. Restores the original `recv()` address in the patched IAT slot.
-2. Restores the original `hdlcon` pointer.
-3. Deletes the audit-log critical section.
-4. Closes the settings file and the message file.
+1. `geoip_stop()` — stops the result drain, signals and **joins** the GeoIP
+   worker thread, and frees its events and critical section (done first, so the
+   thread cannot run while the DLL unloads).
+2. Restores the original `recv()` address in the patched IAT slot.
+3. Restores the original `hdlcon` pointer.
+4. Deletes the audit-log critical section.
+5. Closes the settings file and the message file.
 
 ---
 

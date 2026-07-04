@@ -71,11 +71,12 @@ WIN32;GCWINNT;GCMVC;BBSVER=1000;USE_DEF_FILE;_CRT_SECURE_NO_WARNINGS;_CRT_SECURE
 
 ## Required Libraries
 
-`wgserver_lib.lib`, `galgsbl_lib.lib`, `ws2_32.lib`
+`wgserver_lib.lib`, `galgsbl_lib.lib`, `ws2_32.lib`, `winhttp.lib`
 
-`galtcpip_lib.lib` is intentionally **not** linked. `_tcpipinf` is resolved at
-runtime via `GetProcAddress`, which avoids a DLL load failure from an ordinal
-mismatch on production servers.
+`winhttp.lib` (a standard Windows SDK library) provides the HTTP client used by
+the GeoIP location feature. `galtcpip_lib.lib` is intentionally **not** linked.
+`_tcpipinf` is resolved at runtime via `GetProcAddress`, which avoids a DLL load
+failure from an ordinal mismatch on production servers.
 
 ## Message File Packaging
 
@@ -89,7 +90,7 @@ copying it verbatim:
 
 ```powershell
 $src = "SRC\DIST\SNTIPCTL.MSG"
-$dst = "DIST\1.0.0\SNTIPCTL.MSG"
+$dst = "DIST\1.1.0\SNTIPCTL.MSG"
 $raw = [System.IO.File]::ReadAllText($src, [System.Text.Encoding]::Latin1)
 $raw = $raw -replace '(?<!\x1b)\[', "`e["            # bare [ -> ESC [ (skip any already-escaped)
 $raw = $raw -replace '\r\n', "`n" -replace '\r', "`n" -replace '\n', "`r`n"   # normalize to CRLF
@@ -129,14 +130,9 @@ first run and is **not** shipped.
 ## BBS Installation
 
 1. Copy the `DIST\<version>\` contents to the BBS installation directory.
-2. **Run GCNF** to compile `SNTIPCTL.MSG` into `SNTIPCTL.MCV`. This is required
-   on first install and after any change to the message file. If GCNF is not
-   run, `/TOTALIP` cannot load its screens.
-3. Add `SNTIPCTL` to `wgserv.cfg` **after** `GALTNTD`. Load order is required —
-   proxy detection will not install if `SNTIPCTL` loads first.
-4. If replacing `PROXCLIP` or `IPCTRL`, remove those module lines from
-   `wgserv.cfg` first.
-5. Restart the BBS and confirm the startup log shows `SNTIPCTL` initializing
+2. If replacing `PROXCLIP` or `IPCTRL`, remove those module lines from
+   `wgserv.cfg`.
+3. Restart the BBS and confirm the startup log shows `SNTIPCTL` initializing
    with the expected feature set.
 
 ---
