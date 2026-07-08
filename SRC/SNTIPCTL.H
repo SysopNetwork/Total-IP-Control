@@ -60,11 +60,22 @@
 #define GEN_PRXBLK  1    /* Require trusted proxy / block others (ALT=NO/YES)*/
 #define GEN_CONLIM  2    /* Global connection limit (ALT=NO/YES)           */
 #define GEN_MAXCON  3    /* Max connections per IP (MIN=1 MAX=1000)        */
-#define GEN_LOGON   4    /* Audit logging (ALT=NO/YES)                     */
+#define GEN_LOGON   4    /* Audit logging (ALT=NO/AUDIT/LOG/BOTH)          */
 #define GEN_UIPON   5    /* User profile IP recording (ALT=NO/YES)         */
 #define GEN_UIPFLD  6    /* Profile field number (MIN=1 MAX=5)             */
 #define GEN_BYPKEY  7    /* Bypass key name (text)                         */
 #define GEN_DONE    8    /* Action selector (ALT=SAVE/QUIT)                */
+
+/*
+ * Audit-logging mode (stored in config; spacebar-cycled in the editor as the
+ * GEN_LOGON multichoice).  Values are the 0-based ALT ordinals so fsdord()
+ * maps directly.  Two independent sinks: the BBS Audit Trail (live sysop log,
+ * written via shocst) and daily log files under TOTALIPCONTROL\.
+ */
+#define LOGM_OFF    0    /* no Audit Trail, no log files                   */
+#define LOGM_AUDIT  1    /* BBS Audit Trail only (shocst), no files        */
+#define LOGM_LOG    2    /* daily log files only, no Audit Trail lines     */
+#define LOGM_BOTH   3    /* Audit Trail + log files                        */
 
 /*
  * FSE field numbers -- Trusted Proxy CIDR form (SNTCFG_PRX).

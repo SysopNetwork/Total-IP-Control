@@ -44,7 +44,18 @@
 /* Link the WinHTTP client library (also listed in the .vcxproj for clarity). */
 #pragma comment(lib, "winhttp.lib")
 
-#define SNTIPCTL_VERSION "v1.1.0"
+#define SNTIPCTL_VERSION "v1.1.1"
+
+/*
+ * Name under which the telnet daemon (GALTNTD) registers its server in the
+ * per-channel svrinf list -- TELNETD.H defines this as TNTNAME "Telnet".  The
+ * require-trusted-proxy block is a telnet-only policy (it forces plaintext
+ * telnet through an authorized proxy), so we compare the accepting server's
+ * name against this to leave SSH / Rlogin / FTP / any other daemon untouched.
+ * Kept as a local literal to avoid pulling TELNETD.H's export-decorated globals
+ * into this module.
+ */
+#define SNT_TELNET_SVRNAME "Telnet"
 
 /* ======================================================================== */
 /*   Proxy detection state                                                   */
@@ -129,8 +140,16 @@ static GBOOL           proxy_block_enabled = FALSE;
 static GBOOL conn_limit_enabled = FALSE;
 static INT   conn_limit_max     = 1;
 
-/* Audit logging -- daily log files under TOTALIPCONTROL\PROXCLIP LOGS\. */
-static GBOOL            log_enabled = FALSE;
+/*
+ * Audit logging.  log_mode is one of LOGM_* (OFF/AUDIT/LOG/BOTH) and selects
+ * two independent sinks, derived into log_to_audit / log_to_file by
+ * log_apply_mode():
+ *   - the BBS Audit Trail (the live sysop log, written via shocst), and
+ *   - daily log files under TOTALIPCONTROL\ (PROXCLIP LOGS, DENIED ...).
+ */
+static INT              log_mode     = LOGM_OFF;
+static GBOOL            log_to_audit = FALSE;   /* derived from log_mode        */
+static GBOOL            log_to_file  = FALSE;   /* derived from log_mode        */
 static CRITICAL_SECTION log_cs;
 
 /* User profile IP recording -- write real IP to a user account field at logon. */
@@ -184,7 +203,7 @@ static CHAR gen_fsp[] =
     "PRXBLK(ALT=NO ALT=YES MULTICHOICE) "
     "CONLIM(ALT=NO ALT=YES MULTICHOICE) "
     "MAXCON(MIN=1 MAX=1000) "
-    "LOGON(ALT=NO ALT=YES MULTICHOICE) "
+    "LOGON(ALT=NO ALT=AUDIT ALT=LOG ALT=BOTH MULTICHOICE) "
     "UIPON(ALT=NO ALT=YES MULTICHOICE) "
     "UIPFLD(MIN=1 MAX=5) "
     "BYPKEY "
@@ -260,8 +279,10 @@ static INT snt_vda_sz = 0;
  * offsets match the key spec passed to dfaCreateSpec, regardless of the
  * compiler's default alignment.
  *
- * version == 9 identifies this layout (v8 added the GeoIP block; v9 added the
- * split write-mode / country field / country format / cache-mode flag).
+ * version == 10 identifies this layout (v8 added the GeoIP block; v9 added the
+ * split write-mode / country field / country format / cache-mode flag; v10
+ * repurposed the audit-logging byte from 'Y'/'N' to a LOGM_* mode -- no size
+ * change, so v9 records are byte-compatible and read via legacy mapping).
  * Field sizes:
  *   original v7 core .......... 142 bytes
  *   GeoIP block (v8) .......... 213 bytes
@@ -272,12 +293,12 @@ static INT snt_vda_sz = 0;
 #pragma pack(push, 1)
 struct sntipctlcfg {
     CHAR            recid[16];                      /* key: "SNTIPCTL"         */
-    CHAR            version;                        /* struct version (9)      */
+    CHAR            version;                        /* struct version (10)     */
     CHAR            proxy_trust;                    /* 'Y'/'N'                 */
     struct snt_cidr proxy_cidrs[2];                 /* trusted proxy CIDRs     */
     CHAR            conn_limit;                     /* 'Y'/'N'                 */
     INT             conn_max;                       /* 1-1000                  */
-    CHAR            log_on;                         /* 'Y'/'N'                 */
+    CHAR            log_mode;                       /* LOGM_* (legacy 'Y'/'N') */
     CHAR            usrip_on;                       /* 'Y'/'N'                 */
     INT             usrip_fld;                      /* 1-5                     */
     CHAR            bypass_key[16];                 /* BBS key name or empty   */
@@ -347,6 +368,8 @@ static VOID       build_active_ip_users(ULONG user_ip, CHAR *buf, INT bufsiz);
 static GBOOL      sntipctl_gateway(VOID);
 static VOID       build_log_path(const CHAR *subdir, CHAR *buf, INT bufsiz);
 static VOID       sntipctl_log_event(const CHAR *subdir, const CHAR *userid, ULONG ip, const CHAR *event);
+static VOID       log_apply_mode(VOID);
+static VOID       snt_audit(const CHAR *subdir, const CHAR *userid, ULONG ip, const CHAR *event);
 
 static GBOOL sntipctl_logon(VOID);
 static VOID  sntipctl_hup(VOID);
@@ -494,7 +517,8 @@ init__sntipctl(VOID)
     trusted_proxy_count = 0;
     conn_limit_enabled  = FALSE;
     conn_limit_max      = 1;
-    log_enabled         = FALSE;
+    log_mode            = LOGM_OFF;
+    log_apply_mode();
     usrip_enabled       = FALSE;
     usrip_field         = 1;
     setmem((CHAR *)bypass_key,      sizeof(bypass_key),      0);
@@ -536,9 +560,11 @@ init__sntipctl(VOID)
         shocst("Total IP Control", "WARNING: SNTIPCTL.DAT could not be opened -- using built-in defaults");
     cfg_load();
 
-    if (log_enabled) {
-        /* Create the log directory tree if it does not already exist. */
+    if (log_to_file) {
+        /* Create the log directory tree if it does not already exist.  Only
+         * needed for the file sink -- AUDIT-only mode writes no files. */
         CreateDirectoryA("TOTALIPCONTROL", NULL);
+        CreateDirectoryA("TOTALIPCONTROL\\LOGINS", NULL);
         CreateDirectoryA("TOTALIPCONTROL\\PROXCLIP LOGS", NULL);
         CreateDirectoryA("TOTALIPCONTROL\\DENIED CONNECTIONS", NULL);
         CreateDirectoryA("TOTALIPCONTROL\\DENIED MODULE ACCESS", NULL);
@@ -560,8 +586,12 @@ init__sntipctl(VOID)
     }
     if (conn_limit_enabled)
         shocst("Total IP Control", spr("global connection limit enabled: max %d per IP", conn_limit_max));
-    if (log_enabled)
-        shocst("Total IP Control", "audit file logging enabled in TOTALIPCONTROL folder");
+    if (log_mode != LOGM_OFF)
+        shocst("Total IP Control",
+               spr("audit logging: %s",
+                   log_mode == LOGM_AUDIT ? "Audit Trail only" :
+                   log_mode == LOGM_LOG   ? "log files only (TOTALIPCONTROL)" :
+                                            "Audit Trail + log files"));
     if (usrip_enabled)
         shocst("Total IP Control", spr("user profile IP recording enabled (field %d)", usrip_field));
     if (geoip_enabled)
@@ -863,10 +893,16 @@ prx_consume_header(SOCKET skt, INT unum)
      */
     if (proxy_trust_enabled && trusted_proxy_count > 0 &&
         !is_trusted_proxy((*pp_tcpipinf)[unum].inaddr.s_addr)) {
-        if (log_enabled)
-            sntipctl_log_event("PROXCLIP LOGS", "(connecting)",
-                               (*pp_tcpipinf)[unum].inaddr.s_addr,
-                               "PROXY header ignored -- source not in trusted proxy list");
+        if (log_mode != LOGM_OFF) {
+            CHAR evtbuf[128];
+            struct in_addr a;
+            a.s_addr = (*pp_tcpipinf)[unum].inaddr.s_addr;
+            _snprintf(evtbuf, sizeof(evtbuf),
+                      "chan %02x: telnet PROXY header from %s ignored -- not a trusted proxy",
+                      unum + 1, inet_ntoa(a));
+            snt_audit("PROXCLIP LOGS", "(connecting)",
+                      (*pp_tcpipinf)[unum].inaddr.s_addr, evtbuf);
+        }
         return 1;                            /* consumed but not applied        */
     }
 
@@ -887,14 +923,19 @@ prx_consume_header(SOCKET skt, INT unum)
 
     (*pp_tcpipinf)[unum].inaddr = real_ip;
 
-    if (log_enabled) {
+    /*
+     * The per-connection real-IP record is part of the audit trail, so it is
+     * gated by the audit-logging mode.  In OFF mode nothing is emitted; AUDIT
+     * writes only the BBS Audit Trail line; LOG writes only the PROXCLIP LOGS
+     * file; BOTH writes both.  snt_audit() routes to whichever sinks are on.
+     * This telnet connect-time record is how telnet real IPs reach the trail.
+     */
+    if (log_mode != LOGM_OFF) {
         CHAR evtbuf[128];
         _snprintf(evtbuf, sizeof(evtbuf),
-                  "Proxy header processed on channel %02x, real IP %s", unum + 1, src_ip);
-        sntipctl_log_event("PROXCLIP LOGS", "(connecting)", real_ip.s_addr, evtbuf);
+                  "chan %02x: telnet PROXY header processed, real IP %s", unum + 1, src_ip);
+        snt_audit("PROXCLIP LOGS", "(connecting)", real_ip.s_addr, evtbuf);
     }
-
-    shocst("Total IP Control", spr("chan %02x: real IP %s", unum + 1, src_ip));
     return 1;
 }
 
@@ -922,6 +963,91 @@ sntipctl_hdlcon(VOID)
     }
 
     skt = (*pp_tcpipinf)[usrnum].socket;
+
+    /*
+     * Require-trusted-proxy enforcement.  When enabled (and at least one
+     * trusted proxy CIDR is configured), refuse any connection whose raw
+     * source IP is not one of the trusted proxies -- BEFORE handing the
+     * connection off to GALTNTD.
+     *
+     * This must run ahead of hcsave() (GALTNTD's own hdlcon).  If we let
+     * GALTNTD claim the channel first and only then closed the socket, both
+     * GALTNTD and GALTCPIP would still hold their own copy of the now-closed
+     * socket handle and would try to flush the login banner to it on the next
+     * scheduler cycle -- which is exactly what produced the audit-trail
+     * "TCP/IP ERROR ... SEND error 10038 (Socket operation on non-socket)" and
+     * the garbled trailing bytes after the refusal message.  By rejecting at
+     * the door and returning WITHOUT calling hcsave(), the channel is never
+     * activated and nothing is ever sent to the dead socket.
+     *
+     * The IP examined here is the RAW TCP peer IP (the proxy's address for a
+     * relayed connection, or the client's own address for a direct one) -- it
+     * has not yet been rewritten by the PROXY-header recv hook.  So:
+     *   - relayed via a trusted proxy  -> raw IP is the trusted proxy -> allow
+     *   - direct telnet to the backend -> raw IP is the client        -> block
+     *   - relayed via an unknown proxy -> raw IP is that proxy         -> block
+     *
+     * Loopback (local console) and connection-limit whitelist IPs are always
+     * allowed so a misconfigured CIDR cannot lock the host or trusted admins
+     * out.  An empty trusted list disables blocking entirely (fail-safe).  No
+     * MBBS session exists yet, so the refusal message is written straight to
+     * the socket and the socket is closed directly.
+     */
+    {
+        /*
+         * The require-trusted-proxy block is a TELNET-ONLY policy: it exists to
+         * force plaintext telnet through an authorized TLS-terminating proxy.
+         * SSH (and Rlogin, FTP, or any other registered daemon) is already
+         * encrypted / direct, so it must never be refused here.  Each channel's
+         * tcpipinf records the svrinf that accepted the call; we match its name
+         * against the telnet daemon's registered name (TNTNAME, "Telnet").
+         *
+         * This gates ONLY the block.  The per-IP connection limit, audit
+         * logging, GeoIP, and profile-IP recording all live in the protocol-
+         * agnostic logon path (sntipctl_logon) and rely only on the real client
+         * IP -- which a direct SSH connection already carries -- so they keep
+         * applying to SSH and every other daemon unchanged.
+         */
+        struct svrinf *svr = (*pp_tcpipinf)[usrnum].server;
+        GBOOL is_telnet = (svr != NULL && svr->name != NULL &&
+                           strcmp(svr->name, SNT_TELNET_SVRNAME) == 0);
+
+        if (is_telnet && proxy_block_enabled && trusted_proxy_count > 0 &&
+            skt != INVALID_SOCKET) {
+
+            ULONG raw_ip = (*pp_tcpipinf)[usrnum].inaddr.s_addr;
+
+            if (raw_ip != 0 &&
+                !is_loopback(raw_ip) &&
+                !is_whitelisted(raw_ip) &&
+                !is_trusted_proxy(raw_ip)) {
+
+                if (log_mode != LOGM_OFF) {
+                    CHAR evtbuf[128];
+                    struct in_addr a;
+                    a.s_addr = raw_ip;
+                    _snprintf(evtbuf, sizeof(evtbuf),
+                              "chan %02x: direct/untrusted telnet from %s refused -- require trusted proxy",
+                              usrnum + 1, inet_ntoa(a));
+                    snt_audit("DENIED CONNECTIONS", "(connecting)", raw_ip, evtbuf);
+                }
+
+                if (modmb != NULL) {
+                    const char *tmpl;
+                    setmbk(modmb);
+                    tmpl = rawmsg(PRXBLK);
+                    if (tmpl != NULL)
+                        send(skt, tmpl, (int)strlen(tmpl), 0);
+                    rstmbk();
+                    Sleep(500); /* allow TCP stack to flush before close */
+                }
+                closesocket(skt);
+                (*pp_tcpipinf)[usrnum].socket = INVALID_SOCKET;
+                pending_skt[usrnum] = INVALID_SOCKET;
+                return;  /* refused at the door -- never hand off to GALTNTD */
+            }
+        }
+    }
 
     if (skt != INVALID_SOCKET) {
         if (real_recv != NULL) {
@@ -969,7 +1095,13 @@ sntipctl_hdlcon(VOID)
                                     real_ip.s_addr = inet_addr(src_ip);
                                     if (real_ip.s_addr != INADDR_NONE) {
                                         (*pp_tcpipinf)[usrnum].inaddr = real_ip;
-                                        shocst("Total IP Control", spr("chan %02x: real IP %s (fallback)", usrnum + 1, src_ip));
+                                        if (log_mode != LOGM_OFF) {
+                                            CHAR evtbuf[128];
+                                            _snprintf(evtbuf, sizeof(evtbuf),
+                                                      "chan %02x: telnet PROXY header processed, real IP %s (fallback)",
+                                                      usrnum + 1, src_ip);
+                                            snt_audit("PROXCLIP LOGS", "(connecting)", real_ip.s_addr, evtbuf);
+                                        }
                                     }
                                 }
                             }
@@ -980,88 +1112,35 @@ sntipctl_hdlcon(VOID)
         }
     }
 
-    hcsave();
-
     /*
-     * Require-trusted-proxy enforcement.  When enabled (and at least one
-     * trusted proxy CIDR is configured), refuse any connection whose raw
-     * source IP is not one of the trusted proxies, before the login prompt.
+     * Pre-login global connection-limit enforcement for non-proxy (direct)
+     * connections whose real IP is already known at connect time.  Proxy
+     * connections have pending_skt set here (the real IP is not resolved until
+     * the recv hook consumes the PROXY header), so they are enforced later in
+     * sntipctl_logon via byenow() instead.
      *
-     * The IP examined here is the RAW TCP peer IP (the proxy's address for a
-     * relayed connection, or the client's own address for a direct one) -- it
-     * has not yet been rewritten by the PROXY-header recv hook.  So:
-     *   - relayed via a trusted proxy  -> raw IP is the trusted proxy -> allow
-     *   - direct telnet to the backend -> raw IP is the client        -> block
-     *   - relayed via an unknown proxy -> raw IP is that proxy         -> block
-     *
-     * Loopback (local console) and connection-limit whitelist IPs are always
-     * allowed so a misconfigured CIDR cannot lock the host or trusted admins
-     * out.  An empty trusted list disables blocking entirely.  No MBBS session
-     * exists yet, so the refusal message is written straight to the socket and
-     * the socket is closed directly (the same approach as the pre-login
-     * connection-limit rejection below).
+     * As with the require-trusted-proxy block above, a refused connection is
+     * torn down and we return WITHOUT calling hcsave(), so GALTNTD never
+     * activates the channel and never tries to send to the closed socket.
      */
-    if (proxy_block_enabled && trusted_proxy_count > 0 &&
-        pp_tcpipinf != NULL && usrnum >= 0 && usrnum < nterms) {
-
-        ULONG  raw_ip  = (*pp_tcpipinf)[usrnum].inaddr.s_addr;
-        SOCKET skt_blk = (*pp_tcpipinf)[usrnum].socket;
-
-        if (skt_blk != INVALID_SOCKET && raw_ip != 0 &&
-            !is_loopback(raw_ip) &&
-            !is_whitelisted(raw_ip) &&
-            !is_trusted_proxy(raw_ip)) {
-
-            if (log_enabled)
-                sntipctl_log_event("DENIED CONNECTIONS", "(connecting)", raw_ip,
-                    "Direct/untrusted connection refused -- require trusted proxy");
-
-            if (modmb != NULL) {
-                const char *tmpl;
-                setmbk(modmb);
-                tmpl = rawmsg(PRXBLK);
-                if (tmpl != NULL)
-                    send(skt_blk, tmpl, (int)strlen(tmpl), 0);
-                rstmbk();
-                Sleep(500); /* allow TCP stack to flush before close */
-            }
-            closesocket(skt_blk);
-            (*pp_tcpipinf)[usrnum].socket = INVALID_SOCKET;
-            if (usrnum >= 0 && usrnum < MAXNTERM)
-                pending_skt[usrnum] = INVALID_SOCKET;
-            return;  /* connection refused -- skip all further processing */
-        }
-    }
-
-    /*
-     * Post-connect enforcement for non-proxy connections (real IP is already
-     * known at this point).  Proxy connections are checked in sntipctl_logon
-     * after prx_recv_hook has consumed the PROXY header and patched the IP.
-     *
-     * Order of checks:
-     *   1. Blocked list -- silent drop, no login prompt shown.
-     *   2. Global connection limit -- drop with message.
-     */
-    if (pp_tcpipinf != NULL &&
-        usrnum >= 0 && usrnum < nterms &&
-        pending_skt[usrnum] == INVALID_SOCKET) {
+    if (pending_skt[usrnum] == INVALID_SOCKET) {
 
         ULONG  user_ip  = (*pp_tcpipinf)[usrnum].inaddr.s_addr;
         SOCKET skt_chk  = (*pp_tcpipinf)[usrnum].socket;
 
-        if (user_ip == 0 || skt_chk == INVALID_SOCKET) goto hdlcon_done;
-
-        /* --- Global connection limit --- */
-        if (conn_limit_enabled &&
+        if (user_ip != 0 && skt_chk != INVALID_SOCKET &&
+            conn_limit_enabled &&
             !is_whitelisted(user_ip) &&
             count_active_ip(user_ip) >= conn_limit_max) {
 
-            if (log_enabled) {
+            if (log_mode != LOGM_OFF) {
                 CHAR evtbuf[128];
+                struct in_addr a;
+                a.s_addr = user_ip;
                 _snprintf(evtbuf, sizeof(evtbuf),
-                          "Connection rejected at connect time: per-IP limit (%d max)",
-                          conn_limit_max);
-                sntipctl_log_event("DENIED CONNECTIONS", "(connecting)", user_ip, evtbuf);
+                          "chan %02x: %s rejected at connect -- per-IP limit (%d max)",
+                          usrnum + 1, inet_ntoa(a), conn_limit_max);
+                snt_audit("DENIED CONNECTIONS", "(connecting)", user_ip, evtbuf);
             }
 
             if (modmb != NULL) {
@@ -1090,10 +1169,13 @@ sntipctl_hdlcon(VOID)
             }
             closesocket(skt_chk);
             (*pp_tcpipinf)[usrnum].socket = INVALID_SOCKET;
+            pending_skt[usrnum] = INVALID_SOCKET;
+            return;  /* refused -- never hand off to GALTNTD */
         }
     }
 
-    hdlcon_done: ;
+    /* Connection accepted -- hand off to GALTNTD's own hdlcon. */
+    hcsave();
 }
 
 /* ======================================================================== */
@@ -1296,14 +1378,16 @@ sntipctl_logon(VOID)
         if (!is_whitelisted(user_ip) && !has_bypass_key()) {
             count = count_active_ip(user_ip);
             if (count >= conn_limit_max) {
-                if (log_enabled) {
-                    CHAR evtbuf[128];
+                if (log_mode != LOGM_OFF) {
+                    CHAR evtbuf[160];
+                    struct in_addr a;
+                    const CHAR *uid = (usaptr != NULL && usaptr->userid[0] != '\0')
+                                      ? usaptr->userid : "(unknown)";
+                    a.s_addr = user_ip;
                     _snprintf(evtbuf, sizeof(evtbuf),
-                              "Connection limit exceeded (%d active, max %d) -- session rejected",
-                              count, conn_limit_max);
-                    sntipctl_log_event("DENIED CONNECTIONS",
-                        (usaptr != NULL && usaptr->userid[0] != '\0') ? usaptr->userid : "(unknown)",
-                        user_ip, evtbuf);
+                              "chan %02x: %s (%s) login rejected -- per-IP limit (%d active, %d max)",
+                              usrnum + 1, uid, inet_ntoa(a), count, conn_limit_max);
+                    snt_audit("DENIED CONNECTIONS", uid, user_ip, evtbuf);
                 }
                 /*
                  * Disconnect the user with a message naming the other
@@ -1362,6 +1446,45 @@ sntipctl_logon(VOID)
                  */
                 return 1;
             }
+        }
+    }
+
+    /*
+     * Login access log -- "who connected and from where".  For EVERY successful
+     * login, on ALL protocols (telnet, SSH, Rlogin, ...), record one clean line
+     * in the dedicated TOTALIPCONTROL\LOGINS\ file: timestamp, userid, real IP,
+     * and protocol.  By logon time the real IP is resolved (telnet's PROXY
+     * header was consumed during the handshake; SSH and the rest are direct) and
+     * the userid is known, so this is where every protocol gets a uniform entry.
+     *
+     * Two sinks per the audit mode:
+     *   - log_to_file  -> the LOGINS access-log file (the main purpose here).
+     *   - log_to_audit -> a live BBS Audit Trail line.  Telnet is skipped for
+     *     the TRAIL only, because its real IP was already shown there at connect
+     *     time (prx_consume_header); the LOGINS FILE still records telnet so the
+     *     access log is complete.
+     */
+    if (log_mode != LOGM_OFF && pp_tcpipinf != NULL) {
+        struct svrinf *svr   = (*pp_tcpipinf)[usrnum].server;
+        const CHAR    *proto = (svr != NULL && svr->name != NULL) ? svr->name : "TCP";
+        const CHAR    *uid   = (usaptr != NULL && usaptr->userid[0] != '\0')
+                               ? usaptr->userid : "(unknown)";
+        GBOOL is_telnet = (svr != NULL && svr->name != NULL &&
+                           strcmp(svr->name, SNT_TELNET_SVRNAME) == 0);
+
+        if (log_to_file) {
+            CHAR evtbuf[64];
+            _snprintf(evtbuf, sizeof(evtbuf), "%s login", proto);
+            sntipctl_log_event("LOGINS", uid, user_ip, evtbuf);
+        }
+        if (log_to_audit && !is_telnet) {
+            CHAR evtbuf[160];
+            struct in_addr a;
+            a.s_addr = user_ip;
+            _snprintf(evtbuf, sizeof(evtbuf),
+                      "chan %02x: %s login %s from %s",
+                      usrnum + 1, proto, uid, inet_ntoa(a));
+            shocst("Total IP Control", evtbuf);
         }
     }
 
@@ -1490,7 +1613,7 @@ sntipctl_log_event(const CHAR *subdir, const CHAR *userid, ULONG ip, const CHAR 
     FILE          *fp;
     unsigned char *b;
 
-    if (!log_enabled) return;
+    if (!log_to_file) return;
 
     GetLocalTime(&st);
     build_log_path(subdir != NULL ? subdir : "PROXCLIP LOGS", logpath, sizeof(logpath));
@@ -1513,6 +1636,39 @@ sntipctl_log_event(const CHAR *subdir, const CHAR *userid, ULONG ip, const CHAR 
         fclose(fp);
     }
     LeaveCriticalSection(&log_cs);
+}
+
+/*
+ * log_apply_mode
+ *
+ * Derives the two independent logging sinks from log_mode.  Call after any
+ * change to log_mode (config load, editor save, first-run defaults).
+ */
+static VOID
+log_apply_mode(VOID)
+{
+    log_to_audit = (log_mode == LOGM_AUDIT || log_mode == LOGM_BOTH);
+    log_to_file  = (log_mode == LOGM_LOG   || log_mode == LOGM_BOTH);
+}
+
+/*
+ * snt_audit
+ *
+ * Records one event to whichever audit sink(s) the current mode selects:
+ *   - log_to_file  -> a line in today's TOTALIPCONTROL\<subdir> log file
+ *   - log_to_audit -> a line in the BBS Audit Trail (via shocst)
+ *
+ * The caller builds a self-contained `event` string (including channel and IP
+ * where those matter) so the Audit Trail line reads well on its own; the file
+ * sink additionally records the userid and IP in their own columns.
+ */
+static VOID
+snt_audit(const CHAR *subdir, const CHAR *userid, ULONG ip, const CHAR *event)
+{
+    if (log_to_file)
+        sntipctl_log_event(subdir, userid, ip, event);
+    if (log_to_audit)
+        shocst("Total IP Control", event != NULL ? event : "");
 }
 
 /* ======================================================================== */
@@ -2426,9 +2582,10 @@ write_ip_to_profile(ULONG ip)
     stzcpy(field, ipbuf, maxlen);
     updacc();
 
-    if (log_enabled)
-        sntipctl_log_event("PROXCLIP LOGS", usaptr->userid, ip,
-                           spr("IP recorded to profile field %d", usrip_field));
+    if (log_mode != LOGM_OFF)
+        snt_audit("PROXCLIP LOGS", usaptr->userid, ip,
+                  spr("chan %02x: IP %s recorded to profile field %d",
+                      usrnum + 1, ipbuf, usrip_field));
 }
 
 /*
@@ -2583,7 +2740,9 @@ cfg_launch_gen(VOID)
             proxy_block_enabled ? "YES" : "NO", '\0',
             conn_limit_enabled  ? "YES" : "NO", '\0',
             conn_limit_max,                      '\0',
-            log_enabled         ? "YES" : "NO", '\0',
+            (log_mode == LOGM_AUDIT ? "AUDIT" :
+             log_mode == LOGM_LOG   ? "LOG"   :
+             log_mode == LOGM_BOTH  ? "BOTH"  : "NO"), '\0',
             usrip_enabled       ? "YES" : "NO", '\0',
             usrip_field,                         '\0',
             bypass_key[0] ? bypass_key : "",    '\0');
@@ -2621,14 +2780,19 @@ cfg_gen_done(SHORT save)
         fsdfxt(GEN_MAXCON, buf, sizeof(buf));
         { INT v = atoi(buf); if (v >= 1 && v <= 1000) conn_limit_max = v; }
 
-        ord = fsdord(GEN_LOGON);
-        if (!log_enabled && ord == 1) {
+        ord = fsdord(GEN_LOGON);            /* NO/AUDIT/LOG/BOTH = 0..3 */
+        if (ord >= LOGM_OFF && ord <= LOGM_BOTH)
+            log_mode = ord;
+        log_apply_mode();
+        /* Create the file-log folder tree the first time a file-writing mode
+         * (LOG or BOTH) is selected, so logging works without a restart. */
+        if (log_to_file) {
             CreateDirectoryA("TOTALIPCONTROL", NULL);
+            CreateDirectoryA("TOTALIPCONTROL\\LOGINS", NULL);
             CreateDirectoryA("TOTALIPCONTROL\\PROXCLIP LOGS", NULL);
             CreateDirectoryA("TOTALIPCONTROL\\DENIED CONNECTIONS", NULL);
             CreateDirectoryA("TOTALIPCONTROL\\DENIED MODULE ACCESS", NULL);
         }
-        log_enabled = (ord == 1) ? TRUE : FALSE;
 
         ord = fsdord(GEN_UIPON);
         usrip_enabled = (ord == 1) ? TRUE : FALSE;
@@ -2952,14 +3116,14 @@ cfg_live_to_struct(VOID)
 
     setmem(&sntcfg, sizeof(sntcfg), 0);
     stzcpy(sntcfg.recid, "SNTIPCTL", sizeof(sntcfg.recid));
-    sntcfg.version     = 9;
+    sntcfg.version     = 10;
     sntcfg.proxy_trust = proxy_trust_enabled ? 'Y' : 'N';
     sntcfg.proxy_block = proxy_block_enabled ? 'Y' : 'N';
     for (i = 0; i < SNTIPCTL_MAX_TRUSTED; i++)
         sntcfg.proxy_cidrs[i] = trusted_proxy_cidrs[i];
     sntcfg.conn_limit  = conn_limit_enabled ? 'Y' : 'N';
     sntcfg.conn_max    = conn_limit_max;
-    sntcfg.log_on      = log_enabled    ? 'Y' : 'N';
+    sntcfg.log_mode    = (CHAR)log_mode;
     sntcfg.usrip_on    = usrip_enabled  ? 'Y' : 'N';
     sntcfg.usrip_fld   = usrip_field;
     stzcpy(sntcfg.bypass_key, bypass_key, sizeof(sntcfg.bypass_key));
@@ -3003,7 +3167,19 @@ cfg_struct_to_live(VOID)
     conn_limit_enabled = (sntcfg.conn_limit == 'Y') ? TRUE : FALSE;
     if (sntcfg.conn_max >= 1 && sntcfg.conn_max <= 1000)
         conn_limit_max = sntcfg.conn_max;
-    log_enabled   = (sntcfg.log_on   == 'Y') ? TRUE : FALSE;
+    /*
+     * Audit-logging mode.  v10 stores a LOGM_* code (0..3).  A v9-or-earlier
+     * record stored 'Y'/'N' in this byte; those ASCII values (0x59/0x4E) fall
+     * outside 0..3, so we detect and migrate them: legacy 'Y' (files + trail)
+     * maps to LOGM_BOTH to preserve prior behavior, legacy 'N' to LOGM_OFF.
+     */
+    if (sntcfg.log_mode >= LOGM_OFF && sntcfg.log_mode <= LOGM_BOTH)
+        log_mode = sntcfg.log_mode;
+    else if (sntcfg.log_mode == 'Y')
+        log_mode = LOGM_BOTH;
+    else
+        log_mode = LOGM_OFF;
+    log_apply_mode();
     usrip_enabled = (sntcfg.usrip_on == 'Y') ? TRUE : FALSE;
     if (sntcfg.usrip_fld >= 1 && sntcfg.usrip_fld <= 5)
         usrip_field = sntcfg.usrip_fld;
@@ -3102,7 +3278,13 @@ cfg_load(VOID)
 
     dfaSetBlk(sntbt);
     if (dfaAcqEQ(&sntcfg, &sntcfg, 0)) {
-        if (sntcfg.version == 9) {
+        if (sntcfg.version == 9 || sntcfg.version == 10) {
+            /*
+             * v9 and v10 share an identical byte layout; v10 only reinterprets
+             * the audit-logging byte (LOGM_* vs legacy 'Y'/'N').
+             * cfg_struct_to_live() migrates that byte, so a v9 record loads
+             * cleanly and is rewritten as v10 on the next save.
+             */
             cfg_struct_to_live();
             shocst("Total IP Control", "settings loaded from SNTIPCTL.DAT");
         } else if (sntcfg.version == 7 || sntcfg.version == 8) {
@@ -3153,7 +3335,7 @@ cfg_load(VOID)
             dfaDelete();
             cfg_live_to_struct();
             dfaInsertV(&sntcfg, (USHORT)sizeof(sntcfg));
-            shocst("Total IP Control", "settings migrated to v1.1.0 -- existing settings preserved");
+            shocst("Total IP Control", "settings migrated to v1.1.1 -- existing settings preserved");
         } else {
             /*
              * Record exists but was written by an incompatible older build.
@@ -3531,12 +3713,12 @@ sntipctl_gateway(VOID)
         CHAR usrbuf[256];
         build_ip_in_mod_users(user_ip, modnum, usrbuf, sizeof(usrbuf));
 
-        if (log_enabled) {
-            sntipctl_log_event("DENIED MODULE ACCESS",
-                (usaptr != NULL && usaptr->userid[0] != '\0') ? usaptr->userid : "(unknown)",
-                user_ip,
-                spr("Gateway limit exceeded for module %s (%d active, max %d) -- denied; active users: %s",
-                    modname, ipcount, maxip, usrbuf));
+        if (log_mode != LOGM_OFF) {
+            const CHAR *uid = (usaptr != NULL && usaptr->userid[0] != '\0')
+                              ? usaptr->userid : "(unknown)";
+            snt_audit("DENIED MODULE ACCESS", uid, user_ip,
+                spr("chan %02x: %s denied gateway to module %s -- limit exceeded (%d active, max %d); active users: %s",
+                    usrnum + 1, uid, modname, ipcount, maxip, usrbuf));
         }
 
         prfmsg(IPGDNY, maxip, usrbuf);

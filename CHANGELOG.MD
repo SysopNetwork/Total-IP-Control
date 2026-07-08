@@ -2,6 +2,54 @@
 
 All notable changes to Total IP Control are documented here.
 
+## [1.1.1] — 2026-07-08
+
+### Fixed
+
+- **Rejected connections no longer log a `SEND error 10038 (Socket operation on
+  non-socket)` in the BBS audit trail.** When a connection was refused by
+  *Require trusted proxy* (or the pre-login connection limit), the socket was
+  closed *after* the connection had already been handed to the telnet daemon,
+  so the BBS still tried to flush the login banner to the now-closed socket on
+  the next scheduler cycle. The refusal is now performed *before* the
+  connection is handed off, so the channel is never activated and nothing is
+  ever written to the closed socket. This also removes stray trailing bytes
+  that could appear after the "connection refused" message.
+
+### Changed — Audit logging
+
+- **"Audit logging" is now a four-way choice cycled with the space bar:
+  `NO` / `AUDIT` / `LOG` / `BOTH`.** The setting controls two independent
+  sinks — the BBS **Audit Trail** (the live sysop log) and the daily **log
+  files** under `TOTALIPCONTROL\`. `AUDIT` writes only the Audit Trail, `LOG`
+  writes only the files, `BOTH` writes both, and `NO` writes neither.
+  Previously this was a Yes/No switch that wrote files but also emitted a
+  per-connection IP line to the Audit Trail regardless of the setting; with
+  `NO` selected nothing is logged now.
+- **New login access log** — a dedicated `TOTALIPCONTROL\LOGINS\` daily file
+  records **who connected and from where**: one line per successful login for
+  **every** protocol (telnet, SSH, and others) with the timestamp, user ID, real
+  IP, and protocol. Written whenever file logging is on (`LOG` or `BOTH`).
+- **Every login's real IP is recorded** according to the selected mode. In the
+  Audit Trail, telnet real IPs appear at connect time (when the PROXY header is
+  processed) and SSH and other daemons at login; the `LOGINS\` file records all
+  protocols uniformly at login. Connection and gateway denials are routed to the
+  selected sink(s).
+- The settings record advanced to version 10 (the audit-logging byte was
+  repurposed from `Y`/`N` to the new mode). Existing settings files are read and
+  upgraded automatically with **all settings preserved** — a prior "Yes" maps to
+  `BOTH` (files + trail), matching the previous behavior.
+
+### Changed — SSH Server module compatibility
+
+- **"Require trusted proxy (block direct)" now applies to telnet only.** The
+  block is identified against the accepting server, so SSH, Rlogin, and any
+  other registered daemon are no longer refused by it. SSH connections are
+  direct and already end-to-end encrypted, so the trusted-proxy requirement —
+  which exists to force plaintext telnet through an authorized proxy — does not
+  apply to them. Per-IP connection limiting, audit logging, GeoIP location, and
+  user-profile IP recording continue to apply to SSH and every other protocol.
+
 ## [1.1.0] — 2026-07-04
 
 ### Added

@@ -1,0 +1,59 @@
+Total IP Control v1.1.1 - Release Notes
+Copyright (c) 2026 Sysop Network
+
+Thank you for installing Total IP Control, centralized IP management,
+proxy detection, connection control, and audit logging for The Major
+BBS v10.
+
+What's new in this release:
+  * Fixed: refused connections no longer record a "SEND error 10038
+    (Socket operation on non-socket)" in the audit trail. Connections
+    refused by "Require trusted proxy" (or the pre-login connection
+    limit) are now turned away before the connection is handed to the
+    telnet daemon, so nothing is written to the closed socket. This
+    also removes stray characters that could follow the refusal
+    message.
+  * Audit logging is now a four-way choice, cycled with the space bar:
+    NO, AUDIT, LOG, or BOTH. It controls two independent destinations
+    -- the BBS Audit Trail (the live sysop log) and the daily log
+    files under TOTALIPCONTROL\. NO logs nothing, AUDIT writes only
+    the trail, LOG writes only the files, and BOTH writes both.
+  * New login access log. A dedicated TOTALIPCONTROL\LOGINS\ folder
+    records who connected and from where -- one line per successful
+    login, for every protocol (telnet, SSH, and others), with the date
+    and time, user ID, real IP address, and protocol.
+  * SSH server module compatibility. "Require trusted proxy (block
+    direct)" now applies to telnet only; SSH, Rlogin, and other
+    daemons are no longer refused by it. Connection limiting, audit
+    logging, GeoIP location, and profile IP recording still apply to
+    those connections.
+
+Installing:
+  1. Copy SNTIPCTL.DLL, SNTIPCTL.MDF, and SNTIPCTL.MSG into your BBS
+     installation directory (typically C:\BBSV10).
+  2. Restart the BBS. Total IP Control prints its version and active
+     feature set to the startup log.
+  3. Sign on as a user holding the MASTER key and run /TOTALIP to
+     configure the module. All features are off by default.
+
+Upgrading from an earlier version:
+  1. Stop the BBS.
+  2. Replace SNTIPCTL.DLL, SNTIPCTL.MDF, and SNTIPCTL.MSG with the
+     files from this package.
+  3. Restart the BBS. Your existing settings are preserved and the
+     settings file is upgraded automatically on first start; no
+     reconfiguration is required.
+
+  If you are replacing the older PROXCLIP or IPControl modules, remove
+  their entries from wgserv.cfg.
+
+Notes for this upgrade:
+  * If "Audit logging" was previously enabled, it is carried forward
+    as BOTH (Audit Trail plus log files), matching the prior behavior.
+  * The new TOTALIPCONTROL\LOGINS\ folder appears once file logging is
+    enabled (LOG or BOTH).
+  * If you run an SSH server module alongside Total IP Control, its
+    connections are no longer blocked by "Require trusted proxy."
+
+Total IP Control is developed and maintained by Mark Laudenbach at
+Sysop Network. R&D and testing by Gregory McGill.

@@ -14,7 +14,7 @@ CLIMIT {[0m[1;31m
 } T Connection limit exceeded message
 
 
-CFGHED {[0m[2J[1mTotal IP Control v1.1.0 [0m- Online Configuration
+CFGHED {[0m[2J[1mTotal IP Control v1.1.1 [0m- Online Configuration
 [1;30m-----------------------------------------------
 } T Config editor header
 
@@ -67,7 +67,7 @@ GEN {[0;1;30m--- General Settings ---
   [0mRequire trusted proxy (block direct) [1;33m???
   [0mGlobal connection limit ............ [1;33m???
   [0mMax connections per IP ............. [1;33m$$$$
-  [0mAudit logging ...................... [1;33m???
+  [0mAudit logging ...................... [1;33m?????
   [0mUser profile IP recording .......... [1;33m???
   [0mProfile field for recorded IP ...... [1;33m$$
     [0;36m1=Address1  2=Address2  3=Address3  4=Address4  5=Phone

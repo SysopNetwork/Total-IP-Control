@@ -12,7 +12,7 @@ It consolidates and extends two earlier modules, **PROXCLIP** (proxy protocol / 
 
 - **Trusted proxy enforcement** — Optionally applies PROXY headers only when the connection originates from a configured trusted proxy IP/CIDR, preventing header spoofing from untrusted sources.
 
-- **Require trusted proxy (block direct)** — Optionally refuses any connection that does **not** arrive from a trusted proxy, before the login prompt — stopping users from bypassing the reverse proxy by connecting straight to the backend port. Loopback and whitelisted addresses are always allowed, and an empty trusted-proxy list disables blocking, so a misconfiguration cannot lock the system out.
+- **Require trusted proxy (block direct)** — Optionally refuses any **telnet** connection that does **not** arrive from a trusted proxy, before the login prompt — stopping users from bypassing the reverse proxy by connecting straight to the backend port. Loopback and whitelisted addresses are always allowed, and an empty trusted-proxy list disables blocking, so a misconfiguration cannot lock the system out. This block applies to telnet only; SSH, Rlogin, and other daemons are never refused by it (they are direct and already encrypted), while still being subject to connection limiting and audit logging.
 
 - **Global per-IP connection limits** — Enforces a configurable maximum number of simultaneous sessions from any single IP address, BBS-wide. Connections over the limit are refused at connect time or disconnected at login with a message that names the other sessions already connected from that IP.
 
@@ -26,7 +26,7 @@ It consolidates and extends two earlier modules, **PROXCLIP** (proxy protocol / 
 
 - **GeoIP location** — Looks up each caller's approximate City / State / Country from their IP address at login and stores it in a configurable profile field. Lookups run on a background worker thread so login is never delayed, results are cached per IP to minimize API calls, and a failed lookup can never prevent a user from logging in. US states are stored as the standard two-letter abbreviation; locations elsewhere use the most appropriate subdivision plus country. Built around a provider abstraction so additional providers can be added over time.
 
-- **Audit logging** — Daily, timestamped, thread-safe log files split across four categories (proxy events, denied connections, denied module access, and GeoIP activity).
+- **Audit logging** — A four-way mode (`NO` / `AUDIT` / `LOG` / `BOTH`) cycled with the space bar, controlling two independent sinks: the BBS **Audit Trail** (the live sysop log) and daily, timestamped, thread-safe **log files** under `TOTALIPCONTROL\`. Includes a **login access log** (`LOGINS\`) recording who connected and from where — one line per successful login (all protocols) with user ID, real IP, and protocol — alongside proxy events, denied connections, and denied module access. (GeoIP keeps its own separate log.)
 
 - **Live configuration** — All settings are edited from a full-screen Sysop editor while the BBS is running. Changes take effect immediately and are saved to disk.
 
@@ -40,7 +40,7 @@ It consolidates and extends two earlier modules, **PROXCLIP** (proxy protocol / 
 
 ## Installation
 
-1. Copy the contents of `DIST\1.1.0\` (`SNTIPCTL.DLL`, `SNTIPCTL.MDF`, `SNTIPCTL.MSG`) into the BBS installation directory.
+1. Copy the contents of `DIST\1.1.1\` (`SNTIPCTL.DLL`, `SNTIPCTL.MDF`, `SNTIPCTL.MSG`) into the BBS installation directory.
 2. Restart the BBS. Total IP Control prints its version and active feature set to the startup log.
 
 On first run, a settings file (`SNTIPCTL.DAT`) is created automatically with all features disabled. Configure the module with `/TOTALIP` (see below).
@@ -76,10 +76,10 @@ Each form is saved or abandoned individually. Saved changes take effect immediat
 | Setting | Values | Description |
 |---|---|---|
 | Trusted proxy enforcement | YES / NO | Apply PROXY headers only from trusted proxies |
-| Require trusted proxy (block direct) | YES / NO | Refuse connections not relayed by a trusted proxy |
+| Require trusted proxy (block direct) | YES / NO | Refuse **telnet** connections not relayed by a trusted proxy (SSH and other daemons are exempt) |
 | Global connection limit | YES / NO | Enforce the per-IP connection cap |
 | Max connections per IP | 1–1000 | Maximum simultaneous sessions per IP |
-| Audit logging | YES / NO | Write daily audit log files |
+| Audit logging | NO / AUDIT / LOG / BOTH | Where to record events: nothing, the BBS Audit Trail only, daily log files only, or both (space bar cycles) |
 | User profile IP recording | YES / NO | Record the caller IP to the user profile at login |
 | Profile field for recorded IP | 1–5 | Which profile field to write (see below) |
 | Bypass key | BBS key name | Additional key exempt from the connection limit |
@@ -204,16 +204,19 @@ Users who hold a bypass key are forwarded immediately and their sessions do not 
 
 ## Audit Logs
 
-When audit logging is enabled, daily log files are written under `TOTALIPCONTROL\`, split into three folders:
+**Audit logging** records to two independent sinks depending on the selected mode: the BBS **Audit Trail** (the live sysop log) and/or daily **log files** under `TOTALIPCONTROL\`. `AUDIT` writes only the Audit Trail, `LOG` writes only the files, `BOTH` writes both, and `NO` writes neither. Recorded events include every login's real IP (telnet at connect time; SSH and other daemons at login, tagged with protocol and user ID), untrusted/direct refusals, and connection- and gateway-limit denials.
+
+The daily log files (written in `LOG` or `BOTH` mode) are split into folders:
 
 | Folder | Contents |
 |---|---|
-| `PROXCLIP LOGS\` | Proxy header processing, untrusted-source rejections, profile IP writes |
-| `DENIED CONNECTIONS\` | Global per-IP connection-limit refusals |
+| `LOGINS\` | **Who connected and from where** — one line per successful login (all protocols): timestamp, user ID, real IP, and protocol |
+| `PROXCLIP LOGS\` | Telnet PROXY-header processing, untrusted-source rejections, profile IP writes |
+| `DENIED CONNECTIONS\` | Global per-IP connection-limit refusals and require-trusted-proxy blocks |
 | `DENIED MODULE ACCESS\` | Per-module gateway denials |
 | `GEOIP LOGS\` | GeoIP lookups, cache hits/misses, API errors, rate limiting, and profile updates |
 
-The first three folders are written when **Audit logging** is enabled. The `GEOIP LOGS\` folder has its own **Log level** control on the GeoIP form (independent of the main audit toggle):
+The first four folders are written when **Audit logging** is set to `LOG` or `BOTH`. The `GEOIP LOGS\` folder has its own **Log level** control on the GeoIP form (independent of the main audit setting):
 
 | Log level | Records |
 |---|---|
