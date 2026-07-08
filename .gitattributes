@@ -1,0 +1,20 @@
+# Deploy artifacts must be stored byte-for-byte with no EOL/text conversion.
+# The BBS reads these raw; the deployed .MSG carries literal ESC (0x1B) bytes
+# and CRLF line endings that autocrlf would otherwise corrupt.
+*.DLL   binary
+*.dll   binary
+*.MDF   binary
+*.mdf   binary
+*.MCV   binary
+*.mcv   binary
+
+# Deployed message files (under DIST/) are byte-exact (ESC + CRLF).
+# The SRC/DIST source .MSG is intentionally NOT matched here -- it is bare-'['
+# LF text that is converted to ESC+CRLF at deploy time.
+/DIST/**/*.MSG binary
+
+# Normal source files: let Git manage line endings.
+*.c     text
+*.h     text
+*.md    text
+*.MD    text

@@ -1,0 +1,64 @@
+Total IP Control v1.1.2 - Release Notes
+Copyright (c) 2026 Sysop Network
+
+Thank you for installing Total IP Control, centralized IP management,
+proxy detection, connection control, and audit logging for The Major
+BBS v10.
+
+What's new in this release:
+  * New GeoIP provider: ipinfo.io. Select IPINFO.IO in the Provider
+    field on the GeoIP Location screen. ipinfo derives its city and
+    region data from its own network probing rather than reselling a
+    shared free database, so it is typically more accurate at the city
+    level than the other providers.
+  * ipinfo requires a free API token, one per sysop. Sign up for a free
+    account at https://ipinfo.io/signup, copy the token from your
+    account dashboard, and paste it into the existing Key field on the
+    GeoIP Location screen. The free tier allows 50,000 lookups per
+    month, far more than a BBS needs.
+
+  * New State format option on the GeoIP Location screen: CODE or FULL.
+    CODE shows the two-letter state code (Minnesota becomes MN); FULL
+    shows the full name. It mirrors the existing Country format option
+    and defaults to CODE.
+  * The API Host field is now optional. Leave it blank and the correct
+    host for the selected provider is used automatically; only fill it
+    in to point a provider at a custom endpoint.
+
+Notes:
+  * By default US states are shown using the two-letter code (for
+    example Minnesota is shown as MN), matching the other providers; set
+    State format to FULL for the full name. Non-US regions always keep
+    their full name (for example London, England, GB).
+  * ipinfo returns the country as a two-letter code only; Total IP
+    Control maps it to a full country name, so the Country format
+    (full/code) option works with ipinfo just like the other providers.
+
+Installing:
+  1. Copy SNTIPCTL.DLL, SNTIPCTL.MDF, and SNTIPCTL.MSG into your BBS
+     installation directory (typically C:\BBSV10).
+  2. Restart the BBS. Total IP Control prints its version and active
+     feature set to the startup log.
+  3. Sign on as a user holding the MASTER key and run /TOTALIP to
+     configure the module. All features are off by default.
+
+Upgrading from an earlier version:
+  1. Stop the BBS.
+  2. Replace SNTIPCTL.DLL, SNTIPCTL.MDF, and SNTIPCTL.MSG with the
+     files from this package.
+  3. Restart the BBS. Your existing settings are preserved; no
+     reconfiguration is required.
+
+  If you are replacing the older PROXCLIP or IPControl modules, remove
+  their entries from wgserv.cfg.
+
+Notes for this upgrade:
+  * There is no settings-file change in this release. The provider
+    selection is stored in the existing settings record, so upgrading
+    is drop-in.
+  * To try the new provider, open the GeoIP Location screen, set
+    Provider to IPINFO.IO, and enter your free ipinfo token in the Key
+    field.
+
+Total IP Control is developed and maintained by Mark Laudenbach at
+Sysop Network. R&D and testing by Gregory McGill.

@@ -40,7 +40,7 @@ It consolidates and extends two earlier modules, **PROXCLIP** (proxy protocol / 
 
 ## Installation
 
-1. Copy the contents of `DIST\1.1.1\` (`SNTIPCTL.DLL`, `SNTIPCTL.MDF`, `SNTIPCTL.MSG`) into the BBS installation directory.
+1. Copy the contents of `DIST\1.1.2\` (`SNTIPCTL.DLL`, `SNTIPCTL.MDF`, `SNTIPCTL.MSG`) into the BBS installation directory.
 2. Restart the BBS. Total IP Control prints its version and active feature set to the startup log.
 
 On first run, a settings file (`SNTIPCTL.DAT`) is created automatically with all features disabled. Configure the module with `/TOTALIP` (see below).

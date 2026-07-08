@@ -2,6 +2,54 @@
 
 All notable changes to Total IP Control are documented here.
 
+## [1.1.2] — 2026-07-08
+
+### Added — GeoIP provider
+
+- **ipinfo.io is now a selectable GeoIP provider.** Choose `IPINFO.IO` in the
+  **Provider** field of the GeoIP Location screen. Unlike the existing
+  providers, ipinfo derives its city/region data from its own network probing
+  rather than reselling a shared free database, so it is typically more accurate
+  at the city level. In testing, IPs that the other providers mislocated by
+  hundreds of miles resolved correctly with ipinfo.
+- ipinfo requires a free API token (each sysop supplies their own). Sign up for
+  a free account at `https://ipinfo.io/signup`, copy the token from the account
+  dashboard, and paste it into the existing **Key** field on the GeoIP Location
+  screen. The free tier allows 50,000 lookups per month — far more than a BBS
+  needs.
+
+### Added — State format option
+
+- **New "State format" setting on the GeoIP Location screen: `CODE` or `FULL`.**
+  `CODE` shows the two-letter state code (`Minnesota` → `MN`), `FULL` shows the
+  full name. It mirrors the existing Country format option and defaults to
+  `CODE`, preserving the previous behavior. Non-US regions always show their
+  full name regardless of this setting (there is no universal short code for
+  foreign subdivisions). The choice is applied at write time, so it takes effect
+  on the next lookup without touching stored records.
+
+### Changed — GeoIP API host field
+
+- **The API Host field is now optional and defaults to the selected provider.**
+  Leave it blank and the correct host is used automatically for whichever
+  provider is chosen (`ipwho.is`, `ip-api.com`, `ipapi.co`, or `ipinfo.io`).
+  Only fill it in to point a provider at a custom or self-hosted endpoint. This
+  also fixes a latent issue where a default host left in the field after
+  switching providers could route requests to the wrong host.
+
+### Notes
+
+- ipinfo returns state/region as the full name; it is mapped to the two-letter
+  code for US results (via the new State format option) so it renders like the
+  other providers by default. Non-US regions keep their full name (e.g.
+  `London, England, GB`).
+- ipinfo returns the country as a two-letter code only. Total IP Control now maps
+  the code to a full country name (via a built-in ISO 3166 table), so the Country
+  format FULL/CODE option works with ipinfo just like the other providers.
+- No settings-file change: the new provider and State format settings are stored
+  in spare space within the existing version 10 record. Upgrading is drop-in and
+  preserves all settings.
+
 ## [1.1.1] — 2026-07-08
 
 ### Fixed

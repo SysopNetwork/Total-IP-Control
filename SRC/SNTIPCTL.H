@@ -109,22 +109,24 @@
 #define GEO_FIELD     2  /* City/State field (MIN=1 MAX=5)                */
 #define GEO_CTYFLD    3  /* Country field, SPLIT mode (MIN=1 MAX=5)       */
 #define GEO_CTYFMT    4  /* Country format (ALT=FULL/CODE)               */
-#define GEO_PROVIDER  5  /* GeoIP provider (ALT=IPWHO.IS/IP-API.COM/IPAPI.CO) */
-#define GEO_HOST      6  /* API host name (text)                          */
-#define GEO_KEY       7  /* API key/token, blank for keyless free tier    */
-#define GEO_HTTPS     8  /* Use HTTPS (ALT=YES/NO)                        */
-#define GEO_TIMEOUT   9  /* Per-request timeout seconds (MIN=1 MAX=60)    */
-#define GEO_CACHE    10  /* Cache mode (ALT=OFF/TIME/IP)                  */
-#define GEO_CACHEDUR 11  /* Cache duration in minutes (MIN=1 MAX=44640)   */
-#define GEO_RETRY    12  /* Retries on failed lookup (MIN=0 MAX=5)        */
-#define GEO_LOGLVL   13  /* Log level (ALT=OFF/ERRORS/NORMAL/VERBOSE)     */
-#define GEO_FORMAT   14  /* Location format template (text)               */
-#define GEO_DONE     15  /* Action selector (ALT=SAVE/QUIT)               */
+#define GEO_REGFMT    5  /* State/region format (ALT=CODE/FULL)          */
+#define GEO_PROVIDER  6  /* GeoIP provider (ALT=IPWHO.IS/IP-API.COM/IPAPI.CO/IPINFO.IO) */
+#define GEO_HOST      7  /* API host name (text)                          */
+#define GEO_KEY       8  /* API key/token, blank for keyless free tier    */
+#define GEO_HTTPS     9  /* Use HTTPS (ALT=YES/NO)                        */
+#define GEO_TIMEOUT  10  /* Per-request timeout seconds (MIN=1 MAX=60)    */
+#define GEO_CACHE    11  /* Cache mode (ALT=OFF/TIME/IP)                  */
+#define GEO_CACHEDUR 12  /* Cache duration in minutes (MIN=1 MAX=44640)   */
+#define GEO_RETRY    13  /* Retries on failed lookup (MIN=0 MAX=5)        */
+#define GEO_LOGLVL   14  /* Log level (ALT=OFF/ERRORS/NORMAL/VERBOSE)     */
+#define GEO_FORMAT   15  /* Location format template (text)               */
+#define GEO_DONE     16  /* Action selector (ALT=SAVE/QUIT)               */
 
 /* GeoIP provider identifiers (stored in config). */
 #define GEOPRV_IPWHOIS  0  /* ipwho.is / ipwhois.io (default)             */
 #define GEOPRV_IPAPI    1  /* ip-api.com                                  */
 #define GEOPRV_IPAPICO  2  /* ipapi.co                                    */
+#define GEOPRV_IPINFO   3  /* ipinfo.io (free tier, own probe data)       */
 
 /* GeoIP location write mode (stored in config). */
 #define GEOWM_COMBINED  0  /* whole location string in one field          */
@@ -133,6 +135,10 @@
 /* GeoIP country rendering (stored in config). */
 #define GEOCF_FULL      0  /* full country name, e.g. "United States"     */
 #define GEOCF_CODE      1  /* two-letter ISO code, e.g. "US"              */
+
+/* GeoIP state/region rendering (stored in config). */
+#define GEORF_CODE      0  /* two-letter code where available, e.g. "MN" (default) */
+#define GEORF_FULL      1  /* full subdivision name, e.g. "Minnesota"     */
 
 /*
  * GeoIP cache mode (chosen on the form; stored as two flags -- see

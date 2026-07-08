@@ -44,7 +44,7 @@
 /* Link the WinHTTP client library (also listed in the .vcxproj for clarity). */
 #pragma comment(lib, "winhttp.lib")
 
-#define SNTIPCTL_VERSION "v1.1.1"
+#define SNTIPCTL_VERSION "v1.1.2"
 
 /*
  * Name under which the telnet daemon (GALTNTD) registers its server in the
@@ -179,6 +179,7 @@ static INT   geoip_field     = 3;     /* city/state field: 1=usrad1..4=usrad4, 5
 static GBOOL geoip_split     = TRUE;  /* TRUE=city/state in geoip_field, country in geoip_cty_field */
 static INT   geoip_cty_field = 4;     /* country field in split mode (default Address 4) */
 static INT   geoip_cty_fmt   = GEOCF_FULL; /* country rendering: full name or 2-letter code */
+static INT   geoip_reg_fmt   = GEORF_CODE; /* state/region rendering: 2-letter code or full name */
 static INT   geoip_provider  = GEOPRV_IPWHOIS;
 static GBOOL geoip_use_https = TRUE;
 static INT   geoip_timeout   = 5;     /* seconds per WinHTTP leg               */
@@ -232,9 +233,9 @@ static CHAR wl1_fmt[] =
 
 /*
  * GeoIP Location form field specification.  PROVIDER is a MULTICHOICE listing
- * the available providers; only ipwho.is is implemented in v1.1.0, so it is
- * the sole choice for now.  Adding a provider = add an ALT here (and a case in
- * geo_build_url()/geo_parse_body()).  LOGLVL maps 0..3 to OFF/ERRORS/NORMAL/
+ * the available providers.  Adding a provider = add an ALT here (and a case in
+ * geo_build_url()/geo_parse_body(), and bump the GEOPRV_ bounds guards).
+ * LOGLVL maps 0..3 to OFF/ERRORS/NORMAL/
  * VERBOSE.  Field ordering must match the GEO_* #defines in SNTIPCTL.H.
  */
 static CHAR geo_fsp[] =
@@ -243,7 +244,8 @@ static CHAR geo_fsp[] =
     "FIELD(MIN=1 MAX=5) "
     "CTYFLD(MIN=1 MAX=5) "
     "CTYFMT(ALT=FULL ALT=CODE MULTICHOICE) "
-    "PROVIDER(ALT=IPWHO.IS ALT=IP-API.COM ALT=IPAPI.CO MULTICHOICE) "
+    "REGFMT(ALT=CODE ALT=FULL MULTICHOICE) "
+    "PROVIDER(ALT=IPWHO.IS ALT=IP-API.COM ALT=IPAPI.CO ALT=IPINFO.IO MULTICHOICE) "
     "HOST "
     "KEY "
     "HTTPS(ALT=YES ALT=NO MULTICHOICE) "
@@ -257,6 +259,7 @@ static CHAR geo_fsp[] =
 
 static CHAR geo_fmt[] =
     "ENABLE=%s%c" "WRITEMODE=%s%c" "FIELD=%d%c" "CTYFLD=%d%c" "CTYFMT=%s%c"
+    "REGFMT=%s%c"
     "PROVIDER=%s%c" "HOST=%s%c" "KEY=%s%c" "HTTPS=%s%c" "TIMEOUT=%d%c"
     "CACHE=%s%c" "CACHEDUR=%d%c" "RETRY=%d%c" "LOGLVL=%s%c" "FORMAT=%s%c";
 
@@ -281,13 +284,16 @@ static INT snt_vda_sz = 0;
  *
  * version == 10 identifies this layout (v8 added the GeoIP block; v9 added the
  * split write-mode / country field / country format / cache-mode flag; v10
- * repurposed the audit-logging byte from 'Y'/'N' to a LOGM_* mode -- no size
- * change, so v9 records are byte-compatible and read via legacy mapping).
+ * repurposed the audit-logging byte from 'Y'/'N' to a LOGM_* mode).  The
+ * geoip_reg_fmt (state format) byte was later carved from the spare region with
+ * no size or version change -- a zeroed byte in an older record reads as
+ * GERF_CODE, so v9/v10 records stay byte-compatible via legacy mapping.
  * Field sizes:
  *   original v7 core .......... 142 bytes
  *   GeoIP block (v8) .......... 213 bytes
  *   GeoIP split block (v9) ....   7 bytes
- *   spare ..................... 150 bytes
+ *   geoip_reg_fmt (state fmt) .   1 byte
+ *   spare ..................... 149 bytes
  *   total ..................... 512 bytes
  */
 #pragma pack(push, 1)
@@ -325,7 +331,12 @@ struct sntipctlcfg {
     CHAR            geoip_cty_fmt;                  /* GEOCF_* full/code       */
     CHAR            geoip_cache_bytime;             /* 'Y'=time expiry 'N'=per-IP */
 
-    CHAR            spare[150];                     /* pad to 512 bytes        */
+    /* ---- GeoIP state/region format (struct version 10, no size change) ----
+     * Carved from the spare region, so the record stays 512 bytes and older
+     * files read this byte as 0 (== GEORF_CODE, the historical behavior). */
+    CHAR            geoip_reg_fmt;                  /* GEORF_* code/full       */
+
+    CHAR            spare[149];                     /* pad to 512 bytes        */
 };
 #pragma pack(pop)
 
@@ -413,6 +424,8 @@ static VOID  geoip_drain(VOID);                      /* rtkick target, main thre
 static unsigned __stdcall geoip_worker(VOID *arg);   /* background thread          */
 static GBOOL geoip_http_get(const CHAR *host, const CHAR *path, GBOOL https,
                             INT timeout_s, CHAR *body, INT bodysz, INT *status);
+static const CHAR *geoip_default_host(INT provider);
+static GBOOL geoip_is_builtin_host(const CHAR *h);
 static VOID  geoip_build_url(INT provider, ULONG ip, CHAR *host, INT hostsz,
                              CHAR *path, INT pathsz);
 static GBOOL geoip_parse_body(INT provider, const CHAR *body, struct geo_loc *out);
@@ -531,6 +544,7 @@ init__sntipctl(VOID)
     geoip_split     = TRUE;
     geoip_cty_field = 4;
     geoip_cty_fmt   = GEOCF_FULL;
+    geoip_reg_fmt   = GEORF_CODE;
     geoip_provider  = GEOPRV_IPWHOIS;
     geoip_use_https = TRUE;
     geoip_timeout   = 5;
@@ -539,7 +553,7 @@ init__sntipctl(VOID)
     geoip_cache_min = 1440;
     geoip_retries   = 1;
     geoip_loglevel  = GEOLOG_NORMAL;
-    stzcpy(geoip_host,   "ipwho.is",                    sizeof(geoip_host));
+    setmem((CHAR *)geoip_host, sizeof(geoip_host), 0);  /* blank = use provider default host */
     setmem((CHAR *)geoip_key, sizeof(geoip_key), 0);
     stzcpy(geoip_format, "{city}, {region}, {country}", sizeof(geoip_format));
 
@@ -596,7 +610,7 @@ init__sntipctl(VOID)
         shocst("Total IP Control", spr("user profile IP recording enabled (field %d)", usrip_field));
     if (geoip_enabled)
         shocst("Total IP Control", spr("GeoIP location lookups enabled (host %s, profile field %d)",
-                                       geoip_host[0] ? geoip_host : "ipwho.is", geoip_field));
+                                       geoip_host[0] ? geoip_host : geoip_default_host(geoip_provider), geoip_field));
 
     /* Resolve tcpipinf at runtime. */
     hGaltcpip = GetModuleHandleA("GALTCPIP.DLL");
@@ -1719,7 +1733,8 @@ snt_audit(const CHAR *subdir, const CHAR *userid, ULONG ip, const CHAR *event)
  */
 struct geo_loc {
     CHAR city[64];
-    CHAR region[64];          /* US 2-letter state code, or full subdivision */
+    CHAR region[64];          /* full subdivision name (e.g. "Minnesota")   */
+    CHAR regcode[16];         /* US 2-letter state code (e.g. "MN") or empty */
     CHAR country[64];         /* full country name                          */
     CHAR ccode[8];            /* two-letter ISO country code                */
 };
@@ -1938,6 +1953,40 @@ geo_join_clean(const CHAR *raw, CHAR *out, INT outsz)
  * provider means adding a case here and a matching case in geoip_parse_body().
  * Runs on the main thread so it may read the live config globals safely.
  */
+/*
+ * geoip_default_host / geoip_is_builtin_host
+ *
+ * The API-host field is an optional override.  When it is blank, the effective
+ * host is the selected provider's default, so switching providers "just works"
+ * without the sysop editing the host.  geoip_is_builtin_host() recognizes any
+ * of those default hostnames (and blank), so a stale default left in the field
+ * -- e.g. "ipwho.is" carried over from before a provider change -- is treated as
+ * "no override" rather than silently mis-routing the request.
+ */
+static const CHAR *
+geoip_default_host(INT provider)
+{
+    switch (provider) {
+    case GEOPRV_IPAPI:   return "ip-api.com";
+    case GEOPRV_IPAPICO: return "ipapi.co";
+    case GEOPRV_IPINFO:  return "ipinfo.io";
+    default:             return "ipwho.is";
+    }
+}
+
+static GBOOL
+geoip_is_builtin_host(const CHAR *h)
+{
+    INT p;
+
+    if (h[0] == '\0') return TRUE;
+    /* Compare against every provider's default host (single source of truth --
+     * geoip_default_host) so a new provider needs no change here. */
+    for (p = GEOPRV_IPWHOIS; p <= GEOPRV_IPINFO; p++)
+        if (_stricmp(h, geoip_default_host(p)) == 0) return TRUE;
+    return FALSE;
+}
+
 static VOID
 geoip_build_url(INT provider, ULONG ip, CHAR *host, INT hostsz, CHAR *path, INT pathsz)
 {
@@ -1947,15 +1996,10 @@ geoip_build_url(INT provider, ULONG ip, CHAR *host, INT hostsz, CHAR *path, INT 
     _snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
 
     /* Host: sysop override wins; otherwise the provider's default host. */
-    if (geoip_host[0] != '\0') {
+    if (geoip_host[0] != '\0')
         stzcpy(host, geoip_host, hostsz);
-    } else {
-        switch (provider) {
-        case GEOPRV_IPAPI:   stzcpy(host, "ip-api.com", hostsz); break;
-        case GEOPRV_IPAPICO: stzcpy(host, "ipapi.co",   hostsz); break;
-        default:             stzcpy(host, "ipwho.is",   hostsz); break;
-        }
-    }
+    else
+        stzcpy(host, geoip_default_host(provider), hostsz);
 
     switch (provider) {
     case GEOPRV_IPAPI:
@@ -1967,6 +2011,15 @@ geoip_build_url(INT provider, ULONG ip, CHAR *host, INT hostsz, CHAR *path, INT 
     case GEOPRV_IPAPICO:
         _snprintf(path, pathsz, "/%s/json/", ipbuf);
         break;
+    case GEOPRV_IPINFO:
+        /* ipinfo.io: standard /json endpoint.  A free-tier token is required
+         * (each sysop supplies their own in the KEY field); the token unlocks
+         * the more accurate probe-based city/region data. */
+        if (geoip_key[0] != '\0')
+            _snprintf(path, pathsz, "/%s/json?token=%s", ipbuf, geoip_key);
+        else
+            _snprintf(path, pathsz, "/%s/json", ipbuf);
+        break;
     default: /* GEOPRV_IPWHOIS */
         if (geoip_key[0] != '\0')
             _snprintf(path, pathsz, "/%s?key=%s", ipbuf, geoip_key);
@@ -1974,6 +2027,159 @@ geoip_build_url(INT provider, ULONG ip, CHAR *host, INT hostsz, CHAR *path, INT 
             _snprintf(path, pathsz, "/%s", ipbuf);
         break;
     }
+}
+
+/*
+ * us_state_abbrev
+ *
+ * Maps a full US state / territory name to its USPS two-letter code, or NULL if
+ * unrecognized.  Some providers return only the full subdivision name (ipinfo.io
+ * gives "Minnesota", not "MN"); this normalizes US regions so they render with
+ * the two-letter code the other providers already supply.  Case-insensitive,
+ * CRT only, so it is safe on the worker thread.
+ */
+static const CHAR *
+us_state_abbrev(const CHAR *name)
+{
+    static const struct { const CHAR *name; const CHAR *ab; } tbl[] = {
+        {"Alabama","AL"}, {"Alaska","AK"}, {"Arizona","AZ"}, {"Arkansas","AR"},
+        {"California","CA"}, {"Colorado","CO"}, {"Connecticut","CT"},
+        {"Delaware","DE"}, {"Florida","FL"}, {"Georgia","GA"}, {"Hawaii","HI"},
+        {"Idaho","ID"}, {"Illinois","IL"}, {"Indiana","IN"}, {"Iowa","IA"},
+        {"Kansas","KS"}, {"Kentucky","KY"}, {"Louisiana","LA"}, {"Maine","ME"},
+        {"Maryland","MD"}, {"Massachusetts","MA"}, {"Michigan","MI"},
+        {"Minnesota","MN"}, {"Mississippi","MS"}, {"Missouri","MO"},
+        {"Montana","MT"}, {"Nebraska","NE"}, {"Nevada","NV"},
+        {"New Hampshire","NH"}, {"New Jersey","NJ"}, {"New Mexico","NM"},
+        {"New York","NY"}, {"North Carolina","NC"}, {"North Dakota","ND"},
+        {"Ohio","OH"}, {"Oklahoma","OK"}, {"Oregon","OR"}, {"Pennsylvania","PA"},
+        {"Rhode Island","RI"}, {"South Carolina","SC"}, {"South Dakota","SD"},
+        {"Tennessee","TN"}, {"Texas","TX"}, {"Utah","UT"}, {"Vermont","VT"},
+        {"Virginia","VA"}, {"Washington","WA"}, {"West Virginia","WV"},
+        {"Wisconsin","WI"}, {"Wyoming","WY"}, {"District of Columbia","DC"},
+        {"Puerto Rico","PR"}, {"Guam","GU"}, {"U.S. Virgin Islands","VI"},
+        {"American Samoa","AS"}, {"Northern Mariana Islands","MP"},
+    };
+    INT i;
+
+    if (name == NULL || name[0] == '\0') return NULL;
+    for (i = 0; i < (INT)(sizeof(tbl) / sizeof(tbl[0])); i++)
+        if (_stricmp(name, tbl[i].name) == 0) return tbl[i].ab;
+    return NULL;
+}
+
+/*
+ * cc2name
+ *
+ * Maps a two-letter ISO 3166-1 country code to a common English country name,
+ * or NULL if unrecognized.  ipinfo.io returns only the code (no full name), so
+ * this lets FULL country format render a real name for that provider.  Names
+ * are plain ASCII (no accents) for terminal safety.  Case-insensitive, CRT only.
+ */
+static const CHAR *
+cc2name(const CHAR *code)
+{
+    static const struct { const CHAR *cc; const CHAR *name; } tbl[] = {
+        {"AD","Andorra"}, {"AE","United Arab Emirates"}, {"AF","Afghanistan"},
+        {"AG","Antigua and Barbuda"}, {"AI","Anguilla"}, {"AL","Albania"},
+        {"AM","Armenia"}, {"AO","Angola"}, {"AQ","Antarctica"},
+        {"AR","Argentina"}, {"AS","American Samoa"}, {"AT","Austria"},
+        {"AU","Australia"}, {"AW","Aruba"}, {"AX","Aland Islands"},
+        {"AZ","Azerbaijan"},
+        {"BA","Bosnia and Herzegovina"}, {"BB","Barbados"}, {"BD","Bangladesh"},
+        {"BE","Belgium"}, {"BF","Burkina Faso"}, {"BG","Bulgaria"},
+        {"BH","Bahrain"}, {"BI","Burundi"}, {"BJ","Benin"},
+        {"BL","Saint Barthelemy"}, {"BM","Bermuda"}, {"BN","Brunei"},
+        {"BO","Bolivia"}, {"BQ","Bonaire"}, {"BR","Brazil"},
+        {"BS","Bahamas"}, {"BT","Bhutan"}, {"BV","Bouvet Island"},
+        {"BW","Botswana"}, {"BY","Belarus"}, {"BZ","Belize"},
+        {"CA","Canada"}, {"CC","Cocos Islands"}, {"CD","DR Congo"},
+        {"CF","Central African Republic"}, {"CG","Congo"}, {"CH","Switzerland"},
+        {"CI","Cote d'Ivoire"}, {"CK","Cook Islands"}, {"CL","Chile"},
+        {"CM","Cameroon"}, {"CN","China"}, {"CO","Colombia"},
+        {"CR","Costa Rica"}, {"CU","Cuba"}, {"CV","Cabo Verde"},
+        {"CW","Curacao"}, {"CX","Christmas Island"}, {"CY","Cyprus"},
+        {"CZ","Czechia"},
+        {"DE","Germany"}, {"DJ","Djibouti"}, {"DK","Denmark"},
+        {"DM","Dominica"}, {"DO","Dominican Republic"}, {"DZ","Algeria"},
+        {"EC","Ecuador"}, {"EE","Estonia"}, {"EG","Egypt"},
+        {"EH","Western Sahara"}, {"ER","Eritrea"}, {"ES","Spain"},
+        {"ET","Ethiopia"},
+        {"FI","Finland"}, {"FJ","Fiji"}, {"FK","Falkland Islands"},
+        {"FM","Micronesia"}, {"FO","Faroe Islands"}, {"FR","France"},
+        {"GA","Gabon"}, {"GB","United Kingdom"}, {"GD","Grenada"},
+        {"GE","Georgia"}, {"GF","French Guiana"}, {"GG","Guernsey"},
+        {"GH","Ghana"}, {"GI","Gibraltar"}, {"GL","Greenland"},
+        {"GM","Gambia"}, {"GN","Guinea"}, {"GP","Guadeloupe"},
+        {"GQ","Equatorial Guinea"}, {"GR","Greece"},
+        {"GS","South Georgia and the South Sandwich Islands"},
+        {"GT","Guatemala"}, {"GU","Guam"}, {"GW","Guinea-Bissau"},
+        {"GY","Guyana"},
+        {"HK","Hong Kong"}, {"HM","Heard Island and McDonald Islands"},
+        {"HN","Honduras"}, {"HR","Croatia"},
+        {"HT","Haiti"}, {"HU","Hungary"},
+        {"ID","Indonesia"}, {"IE","Ireland"}, {"IL","Israel"},
+        {"IM","Isle of Man"}, {"IN","India"}, {"IO","British Indian Ocean Territory"},
+        {"IQ","Iraq"}, {"IR","Iran"}, {"IS","Iceland"}, {"IT","Italy"},
+        {"JE","Jersey"}, {"JM","Jamaica"}, {"JO","Jordan"}, {"JP","Japan"},
+        {"KE","Kenya"}, {"KG","Kyrgyzstan"}, {"KH","Cambodia"},
+        {"KI","Kiribati"}, {"KM","Comoros"}, {"KN","Saint Kitts and Nevis"},
+        {"KP","North Korea"}, {"KR","South Korea"}, {"KW","Kuwait"},
+        {"KY","Cayman Islands"}, {"KZ","Kazakhstan"},
+        {"LA","Laos"}, {"LB","Lebanon"}, {"LC","Saint Lucia"},
+        {"LI","Liechtenstein"}, {"LK","Sri Lanka"}, {"LR","Liberia"},
+        {"LS","Lesotho"}, {"LT","Lithuania"}, {"LU","Luxembourg"},
+        {"LV","Latvia"}, {"LY","Libya"},
+        {"MA","Morocco"}, {"MC","Monaco"}, {"MD","Moldova"},
+        {"ME","Montenegro"}, {"MF","Saint Martin"}, {"MG","Madagascar"},
+        {"MH","Marshall Islands"}, {"MK","North Macedonia"}, {"ML","Mali"},
+        {"MM","Myanmar"}, {"MN","Mongolia"}, {"MO","Macao"},
+        {"MP","Northern Mariana Islands"}, {"MQ","Martinique"}, {"MR","Mauritania"},
+        {"MS","Montserrat"}, {"MT","Malta"}, {"MU","Mauritius"},
+        {"MV","Maldives"}, {"MW","Malawi"}, {"MX","Mexico"},
+        {"MY","Malaysia"}, {"MZ","Mozambique"},
+        {"NA","Namibia"}, {"NC","New Caledonia"}, {"NE","Niger"},
+        {"NF","Norfolk Island"}, {"NG","Nigeria"}, {"NI","Nicaragua"},
+        {"NL","Netherlands"}, {"NO","Norway"}, {"NP","Nepal"},
+        {"NR","Nauru"}, {"NU","Niue"}, {"NZ","New Zealand"},
+        {"OM","Oman"},
+        {"PA","Panama"}, {"PE","Peru"}, {"PF","French Polynesia"},
+        {"PG","Papua New Guinea"}, {"PH","Philippines"}, {"PK","Pakistan"},
+        {"PL","Poland"}, {"PM","Saint Pierre and Miquelon"}, {"PN","Pitcairn"},
+        {"PR","Puerto Rico"}, {"PS","Palestine"}, {"PT","Portugal"},
+        {"PW","Palau"}, {"PY","Paraguay"},
+        {"QA","Qatar"},
+        {"RE","Reunion"}, {"RO","Romania"}, {"RS","Serbia"},
+        {"RU","Russia"}, {"RW","Rwanda"},
+        {"SA","Saudi Arabia"}, {"SB","Solomon Islands"}, {"SC","Seychelles"},
+        {"SD","Sudan"}, {"SE","Sweden"}, {"SG","Singapore"},
+        {"SH","Saint Helena"}, {"SI","Slovenia"}, {"SJ","Svalbard and Jan Mayen"},
+        {"SK","Slovakia"}, {"SL","Sierra Leone"}, {"SM","San Marino"},
+        {"SN","Senegal"}, {"SO","Somalia"}, {"SR","Suriname"},
+        {"SS","South Sudan"}, {"ST","Sao Tome and Principe"}, {"SV","El Salvador"},
+        {"SX","Sint Maarten"}, {"SY","Syria"}, {"SZ","Eswatini"},
+        {"TC","Turks and Caicos Islands"}, {"TD","Chad"},
+        {"TF","French Southern Territories"}, {"TG","Togo"},
+        {"TH","Thailand"}, {"TJ","Tajikistan"}, {"TK","Tokelau"},
+        {"TL","Timor-Leste"}, {"TM","Turkmenistan"}, {"TN","Tunisia"},
+        {"TO","Tonga"}, {"TR","Turkey"}, {"TT","Trinidad and Tobago"},
+        {"TV","Tuvalu"}, {"TW","Taiwan"}, {"TZ","Tanzania"},
+        {"UA","Ukraine"}, {"UG","Uganda"},
+        {"UM","United States Minor Outlying Islands"}, {"US","United States"},
+        {"UY","Uruguay"}, {"UZ","Uzbekistan"},
+        {"VA","Vatican City"}, {"VC","Saint Vincent and the Grenadines"},
+        {"VE","Venezuela"}, {"VG","British Virgin Islands"},
+        {"VI","U.S. Virgin Islands"}, {"VN","Vietnam"}, {"VU","Vanuatu"},
+        {"WF","Wallis and Futuna"}, {"WS","Samoa"},
+        {"YE","Yemen"}, {"YT","Mayotte"},
+        {"ZA","South Africa"}, {"ZM","Zambia"}, {"ZW","Zimbabwe"},
+    };
+    INT i;
+
+    if (code == NULL || code[0] == '\0') return NULL;
+    for (i = 0; i < (INT)(sizeof(tbl) / sizeof(tbl[0])); i++)
+        if (_stricmp(code, tbl[i].cc) == 0) return tbl[i].name;
+    return NULL;
 }
 
 /*
@@ -2012,6 +2218,22 @@ geoip_parse_body(INT provider, const CHAR *body, struct geo_loc *out)
         json_get_str(body, "country",      out->ccode,   sizeof(out->ccode));   /* 2-letter */
         json_get_str(body, "country_name", out->country, sizeof(out->country));
         break;
+    case GEOPRV_IPINFO:
+        /* ipinfo.io has no error flag on success; a bad token or unlocatable IP
+         * simply omits city/region (the final has-any-component check catches
+         * it).  region is the full subdivision name (no 2-letter code), and
+         * country is the ISO code only -- no full country name is returned, so
+         * FULL country-format mode renders the code for this provider. */
+        json_get_str(body, "city",     out->city,    sizeof(out->city));
+        json_get_str(body, "region",   regfull,      sizeof(regfull));
+        json_get_str(body, "country",  out->ccode,   sizeof(out->ccode));   /* 2-letter */
+        /* ipinfo returns no full country name; derive one from the code so FULL
+         * country format shows a real name (falls back to the code if unknown). */
+        {
+            const CHAR *nm = cc2name(out->ccode);
+            stzcpy(out->country, nm ? nm : out->ccode, sizeof(out->country));
+        }
+        break;
     default: /* GEOPRV_IPWHOIS */
         if (!json_get_bool_true(body, "success")) return FALSE;
         json_get_str(body, "city",         out->city,    sizeof(out->city));
@@ -2022,13 +2244,26 @@ geoip_parse_body(INT provider, const CHAR *body, struct geo_loc *out)
         break;
     }
 
-    /* US -> two-letter state code; elsewhere -> full subdivision name. */
-    if (_stricmp(out->ccode, "US") == 0 && regcode[0] != '\0')
-        stzcpy(out->region, regcode, sizeof(out->region));
-    else if (regfull[0] != '\0')
+    /* When a US result carried only the full state name (ipinfo.io does), map
+     * it to the two-letter code so the CODE format has something to show. */
+    if (_stricmp(out->ccode, "US") == 0 && regcode[0] == '\0' && regfull[0] != '\0') {
+        const CHAR *ab = us_state_abbrev(regfull);
+        if (ab != NULL) stzcpy(regcode, ab, sizeof(regcode));
+    }
+
+    /* Store both forms; the main thread picks one per the State format setting.
+     * region = full subdivision name (preferred). regcode = the US 2-letter
+     * state code ONLY -- non-US subdivision codes ("BY", "ENG", ...) are opaque,
+     * so regcode is left empty for them and CODE format falls back to the full
+     * name at apply time (matching how non-US has always rendered). */
+    if (regfull[0] != '\0')
         stzcpy(out->region, regfull, sizeof(out->region));
     else
         stzcpy(out->region, regcode, sizeof(out->region));
+    if (_stricmp(out->ccode, "US") == 0)
+        stzcpy(out->regcode, regcode, sizeof(out->regcode));
+    else
+        out->regcode[0] = '\0';
 
     return (GBOOL)(out->city[0] != '\0' || out->region[0] != '\0' || out->country[0] != '\0');
 }
@@ -2345,17 +2580,27 @@ geoip_apply(INT channel, const CHAR *userid, const struct geo_loc *L)
     if (userid != NULL && userid[0] != '\0' && strcmp(ua->userid, userid) != 0)
         return;                                   /* channel reused -- skip    */
 
-    if (geoip_split) {
-        const CHAR *country = (geoip_cty_fmt == GEOCF_CODE) ? L->ccode : L->country;
-        geo_format(geoip_format, L, FALSE, primary, sizeof(primary));   /* City, State */
-        changed |= geo_set_field(ua, geoip_field, primary);
-        /* Only write the country separately when it targets a different field
-         * (guards against a misconfiguration that would clobber city/state). */
-        if (geoip_cty_field != geoip_field)
-            changed |= geo_set_field(ua, geoip_cty_field, country);
-    } else {
-        geo_format(geoip_format, L, TRUE, primary, sizeof(primary));    /* City, State, Country */
-        changed |= geo_set_field(ua, geoip_field, primary);
+    /* Apply the State format choice here, on the main thread, so it always uses
+     * the current setting: CODE swaps in the 2-letter code when one exists (US),
+     * FULL keeps the full subdivision name.  Work on a local copy so {region}
+     * substitution in geo_format() renders the chosen form. */
+    {
+        struct geo_loc lc = *L;
+        if (geoip_reg_fmt == GEORF_CODE && lc.regcode[0] != '\0')
+            stzcpy(lc.region, lc.regcode, sizeof(lc.region));
+
+        if (geoip_split) {
+            const CHAR *country = (geoip_cty_fmt == GEOCF_CODE) ? lc.ccode : lc.country;
+            geo_format(geoip_format, &lc, FALSE, primary, sizeof(primary));   /* City, State */
+            changed |= geo_set_field(ua, geoip_field, primary);
+            /* Only write the country separately when it targets a different field
+             * (guards against a misconfiguration that would clobber city/state). */
+            if (geoip_cty_field != geoip_field)
+                changed |= geo_set_field(ua, geoip_cty_field, country);
+        } else {
+            geo_format(geoip_format, &lc, TRUE, primary, sizeof(primary));    /* City, State, Country */
+            changed |= geo_set_field(ua, geoip_field, primary);
+        }
     }
 
     if (!changed) return;                         /* nothing new -- no write   */
@@ -2995,6 +3240,7 @@ cfg_launch_geo(VOID)
     switch (geoip_provider) {
     case GEOPRV_IPAPI:   prov = "IP-API.COM"; break;
     case GEOPRV_IPAPICO: prov = "IPAPI.CO";   break;
+    case GEOPRV_IPINFO:  prov = "IPINFO.IO";  break;
     default:             prov = "IPWHO.IS";   break;
     }
 
@@ -3006,8 +3252,9 @@ cfg_launch_geo(VOID)
             geoip_field,                                         '\0',
             geoip_cty_field,                                     '\0',
             (geoip_cty_fmt == GEOCF_CODE) ? "CODE" : "FULL",     '\0',
+            (geoip_reg_fmt == GEORF_FULL) ? "FULL" : "CODE",     '\0',
             prov,                                                '\0',
-            geoip_host[0]   ? geoip_host   : "ipwho.is",         '\0',
+            geoip_host[0]   ? geoip_host   : geoip_default_host(geoip_provider), '\0',
             geoip_key[0]    ? geoip_key    : "",                 '\0',
             geoip_use_https ? "YES" : "NO",                      '\0',
             geoip_timeout,                                       '\0',
@@ -3052,11 +3299,20 @@ cfg_geo_done(SHORT save)
         ord = fsdord(GEO_CTYFMT);             /* FULL(0)/CODE(1) */
         geoip_cty_fmt = (ord == GEOCF_CODE) ? GEOCF_CODE : GEOCF_FULL;
 
-        ord = fsdord(GEO_PROVIDER);           /* IPWHO.IS(0)/IP-API.COM(1)/IPAPI.CO(2) */
-        if (ord >= 0 && ord <= GEOPRV_IPAPICO) geoip_provider = ord;
+        ord = fsdord(GEO_REGFMT);             /* CODE(0)/FULL(1) */
+        geoip_reg_fmt = (ord == GEORF_FULL) ? GEORF_FULL : GEORF_CODE;
+
+        ord = fsdord(GEO_PROVIDER);           /* IPWHO.IS(0)/IP-API.COM(1)/IPAPI.CO(2)/IPINFO.IO(3) */
+        if (ord >= 0 && ord <= GEOPRV_IPINFO) geoip_provider = ord;
 
         fsdfxt(GEO_HOST, geoip_host, sizeof(geoip_host));
         fsdfxt(GEO_KEY,  geoip_key,  sizeof(geoip_key));
+
+        /* A blank or built-in-default host means "no override" -- store it empty
+         * so the effective host always tracks the selected provider (and a stale
+         * default such as "ipwho.is" left after a provider change never sticks). */
+        if (geoip_is_builtin_host(geoip_host))
+            geoip_host[0] = '\0';
 
         ord = fsdord(GEO_HTTPS);              /* ALT=YES(0)/NO(1) */
         geoip_use_https = (ord == 0) ? TRUE : FALSE;
@@ -3088,7 +3344,6 @@ cfg_geo_done(SHORT save)
 
         fsdfxt(GEO_FORMAT, geoip_format, sizeof(geoip_format));
 
-        if (geoip_host[0]   == '\0') stzcpy(geoip_host,   "ipwho.is",                    sizeof(geoip_host));
         if (geoip_format[0] == '\0') stzcpy(geoip_format, "{city}, {region}, {country}", sizeof(geoip_format));
 
         /* Make sure the GeoIP log folder exists if logging was just enabled. */
@@ -3146,6 +3401,7 @@ cfg_live_to_struct(VOID)
     sntcfg.geoip_split   = geoip_split ? 'Y' : 'N';
     sntcfg.geoip_cty_fld = geoip_cty_field;
     sntcfg.geoip_cty_fmt = (CHAR)geoip_cty_fmt;
+    sntcfg.geoip_reg_fmt = (CHAR)geoip_reg_fmt;
     sntcfg.geoip_cache_bytime = geoip_cache_bytime ? 'Y' : 'N';
 }
 
@@ -3196,7 +3452,7 @@ cfg_struct_to_live(VOID)
     geoip_enabled   = (sntcfg.geoip_on == 'Y') ? TRUE : FALSE;
     if (sntcfg.geoip_fld >= 1 && sntcfg.geoip_fld <= 5)
         geoip_field = sntcfg.geoip_fld;
-    if (sntcfg.geoip_provider >= 0 && sntcfg.geoip_provider <= GEOPRV_IPAPICO)
+    if (sntcfg.geoip_provider >= 0 && sntcfg.geoip_provider <= GEOPRV_IPINFO)
         geoip_provider = sntcfg.geoip_provider;
     geoip_use_https = (sntcfg.geoip_https == 'Y') ? TRUE : FALSE;
     if (sntcfg.geoip_timeout >= 1 && sntcfg.geoip_timeout <= 60)
@@ -3211,7 +3467,10 @@ cfg_struct_to_live(VOID)
     stzcpy(geoip_host,   sntcfg.geoip_host,   sizeof(geoip_host));
     stzcpy(geoip_key,    sntcfg.geoip_key,    sizeof(geoip_key));
     stzcpy(geoip_format, sntcfg.geoip_format, sizeof(geoip_format));
-    if (geoip_host[0]   == '\0') stzcpy(geoip_host,   "ipwho.is",                    sizeof(geoip_host));
+    /* Normalize a blank or built-in-default host to empty so the effective host
+     * tracks the selected provider (also heals legacy records that stored a
+     * forced "ipwho.is" default under a non-default provider). */
+    if (geoip_is_builtin_host(geoip_host)) geoip_host[0] = '\0';
     if (geoip_format[0] == '\0') stzcpy(geoip_format, "{city}, {region}, {country}", sizeof(geoip_format));
 
     geoip_split = (sntcfg.geoip_split == 'Y') ? TRUE : FALSE;
@@ -3219,6 +3478,10 @@ cfg_struct_to_live(VOID)
         geoip_cty_field = sntcfg.geoip_cty_fld;
     if (sntcfg.geoip_cty_fmt == GEOCF_FULL || sntcfg.geoip_cty_fmt == GEOCF_CODE)
         geoip_cty_fmt = sntcfg.geoip_cty_fmt;
+    /* State/region format: a zeroed byte from a record written before this field
+     * existed maps to GEORF_CODE (0), preserving the historical 2-letter output. */
+    if (sntcfg.geoip_reg_fmt == GEORF_CODE || sntcfg.geoip_reg_fmt == GEORF_FULL)
+        geoip_reg_fmt = sntcfg.geoip_reg_fmt;
     /* Cache mode: only 'N' means per-IP; anything else (incl. a zeroed byte
      * from a pre-v9 record) means the historical time-based expiry. */
     geoip_cache_bytime = (sntcfg.geoip_cache_bytime == 'N') ? FALSE : TRUE;
@@ -3311,7 +3574,7 @@ cfg_load(VOID)
                 geoip_cache_min = 1440;
                 geoip_retries   = 1;
                 geoip_loglevel  = GEOLOG_NORMAL;
-                stzcpy(geoip_host,   "ipwho.is",                    sizeof(geoip_host));
+                geoip_host[0] = '\0';   /* blank = use provider default host */
                 geoip_key[0] = '\0';
                 stzcpy(geoip_format, "{city}, {region}, {country}", sizeof(geoip_format));
             }
@@ -3330,6 +3593,7 @@ cfg_load(VOID)
             geoip_split        = (sntcfg.version == 7) ? TRUE : FALSE;
             geoip_cty_field    = 4;
             geoip_cty_fmt      = GEOCF_FULL;
+            geoip_reg_fmt      = GEORF_CODE;
             geoip_cache_bytime = TRUE;      /* new in v9 -- historical time mode */
 
             dfaDelete();
