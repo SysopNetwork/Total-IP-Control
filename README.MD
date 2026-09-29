@@ -244,6 +244,11 @@ Logging is thread-safe; multiple channels can write concurrently.
 
 Total IP Control is maintained by Sysop Network.
 
+## Tips / Donations
+
+- **Cash App:** [$laudenbachm](https://cash.app/$laudenbachm)
+- **Ko-fi:** [ko-fi.com/laudenbachm](https://ko-fi.com/laudenbachm)
+
 ## License
 
 Released under the MIT License. See [LICENSE](LICENSE) for details.
