@@ -1,0 +1,140 @@
+Total IP Control v2.0.0-beta37 - Longer lists, and a nicer settings menu
+Copyright (c) 2026 Sysop Network
+
+This is a BETA test build. It carries forward everything in beta36 and
+every earlier 2.0.0 beta.
+
+  This build replaces ALL THREE files: SNTIPCTL.DLL, SNTIPCTL.MSG and
+  SNTIPCTL.MDF. The DLL and MSG must be installed together.
+
+
+What is new in beta37:
+  * 10 trusted proxies each for telnet and SSH (was 2).
+
+  * 50 entries each in the IPv4 and IPv6 whitelists (was 10), shown 10
+    to a page: N and P turn the page, and any entry's number (1-50)
+    works from any page. "Connection Limit Whitelist (IPv4)" is now
+    called "IPv4 Whitelist".
+
+  * A smarter-looking menu: box-drawn title bars, the section list shows
+    what each section holds ("3 of 50 in use", "2 settings, 1 proxy"),
+    values are coloured (YES green, unset entries dim), a setting that
+    cannot work yet shows why in red beside its value, and paged
+    sections show "page 2 of 5" in their title bar.
+
+  * Your existing proxies and whitelist entries carry over. The longer
+    lists are kept in new records of SNTIPCTL.DAT; the first 2 proxies
+    and first 10 IPv4 entries are also still kept where earlier builds
+    look for them, so going back to an earlier build keeps those.
+
+
+From beta36 (if you have not installed it):
+  * The command is now /TIP (it was /TOTALIP).
+
+  * The settings menu opens on six sections, like the Globals settings
+    menu, in the order of the old configuration forms:
+
+       1. General Settings                    8 settings
+       2. Telnet Trusted Proxies              4 settings
+       3. Connection Limit Whitelist (IPv4)  10 settings
+       4. IPv6 Whitelist                     10 settings
+       5. GeoIP Location                     16 settings
+       6. SSH Settings                        6 settings
+
+    Pick a section to see its settings with their current values,
+    numbered from 1. Type a setting's number, and the menu shows its
+    value and what is allowed; type the new value, or press Enter to keep
+    it. A setting with fixed choices lists them by number. X goes back
+    one step.
+
+  * Sysops can also reach the same menu from a BBS menu item. In the
+    Menu Tree editor, add an item that runs the Total IP Control module
+    with the command line:
+
+       MENU=SYSOPMENU
+
+    Give the item a Sysop key so only you see it. MASTER access is
+    needed, as for /TIP. MODULE=, MAXIP= and BYPASS= work as before for
+    the per-module gateway; other MENU= names are reserved for later.
+
+  * Help everywhere. ? at any prompt explains that setting; in a section,
+    H and a number (H 2) explains a setting without opening it; H alone
+    is a quick-start guide.
+
+  * Changes apply and save at once (there is no Save step), and every
+    change writes an Audit Trail line naming the Sysop, the section and
+    the setting.
+
+  * The menu tells you when a setting cannot do its job yet, for example
+    "Block direct connections  YES (inactive: no proxy listed)".
+
+  * All of the menu's text is in SNTIPCTL.MSG, so it can be reworded in
+    the BBS's message editor like the rest.
+
+  * The connection-limit and module-gateway refusal messages (CLIMIT,
+    IPGDNY) use named variables (N!SNTUSERS, N!SNTMAXIP) in place of %s
+    and %d, so their text can be reworded and reordered freely.
+
+  * The DLL's file properties show the right version again (they had
+    been stuck at beta31).
+
+
+Where the old form settings are now:
+  The telnet "trusted proxy enforcement" and "require trusted proxy"
+  switches moved from General Settings into Telnet Trusted Proxies, next
+  to the proxies they use. Profile fields are picked by name (ADDRESS1-
+  ADDRESS4 or PHONE) instead of 1-5. Keys, text and addresses are cleared
+  by entering -.
+
+
+What is NOT changed:
+  * No setting is removed or renamed, and every existing value carries
+    over unchanged.
+  * Connection handling (PROXY headers, blocking, limits, the SSH
+    prx_ssh_ready() export from beta33/34) is unchanged, apart from how
+    the refusal messages get their user list (now a named variable).
+
+
+Installing:
+  1. Stop the BBS.
+  2. Copy SNTIPCTL.DLL, SNTIPCTL.MSG, SNTIPCTL.MDF and SNTIPCTL.RLN into
+     your BBS installation directory (typically C:\BBSV10), replacing
+     the old files.
+  3. Restart. The Audit Trail at start-up should report v2.0.0-beta37.
+
+  If you had reworded any Total IP Control message (CLIMIT, PRXBLK,
+  IPGDNY, IPGGNT, MYIP, WHOHDR, WHOROW) in the message editor, the new
+  SNTIPCTL.MSG replaces it: note your text before installing and redo it
+  afterwards. In CLIMIT and IPGDNY, use N!SNTUSERS where %s was and
+  N!SNTMAXIP where %d was.
+
+
+How to test:
+  1. Type /TIP as a Master user: the six sections should list with their
+     setting counts. /TOTALIP no longer does anything.
+  2. Add a Sysop menu item with command line MENU=SYSOPMENU; selecting it
+     should show the same menu, and X should return you to that menu.
+     MENU=ANYTHINGELSE should do nothing and leave a WARNING in the Audit
+     Trail.
+  3. Open each section; GeoIP Location (16 settings) should fit on one
+     screen. In IPv4 Whitelist, N and P should page 1-10, 11-20 ... 41-50
+     and wrap around; typing 37 from page 1 should open entry 37.
+     After upgrading, your old proxies and whitelist entries should all
+     be there.
+  4. Change a yes/no setting and a number. Each should say "saved", show
+     the new value, and leave an Audit Trail line naming the section.
+  5. Change a list setting (General Settings 5): it lists the choices;
+     pick one by number and another time by name.
+  6. Add a telnet trusted proxy 10, an SSH trusted proxy 7, IPv4 entry
+     50 and IPv6 entry 37, and clear (-) one. Restart the BBS and confirm
+     they all persisted. The section list's counts should match.
+  7. Type ? at a setting's prompt, H 2 in a section, and H in the list.
+  8. No "More?" pause should appear anywhere in the menu.
+  9. Trigger the connection limit (or a gateway limit) and check the
+     refusal message still names the other users.
+  10. Check that an existing gateway item (MODULE=... MAXIP=...) still
+      works.
+
+
+Total IP Control is developed and maintained by Mark Laudenbach at
+Sysop Network. R&D and testing by Gregory McGill.
