@@ -2,6 +2,127 @@
 
 All notable changes to Total IP Control are documented here.
 
+## [2.0.0] — 2026-11-12
+
+**Upgrading from 1.x:** install `SNTIPCTL.DLL`, `SNTIPCTL.MSG`, `SNTIPCTL.MDF`
+and `SNTIPCTL.RLN` together. Every message renumbers, so if you reworded any
+Total IP Control message in the message editor, note your text first and redo
+it afterwards. Existing settings in `SNTIPCTL.DAT` are read and upgraded
+automatically with **all settings preserved**.
+
+### Added — Settings menu
+
+- **`/TIP` replaces `/TOTALIP`** and the six full-screen forms. It opens on six
+  sections — General Settings, Telnet Trusted Proxies, IPv4 Whitelist, IPv6
+  Whitelist, GeoIP Location, SSH Settings — each listing its settings with
+  their current values, numbered from 1. Type a number, see what is allowed,
+  type the new value. `X` goes back one step.
+- **Changes apply and save at once.** There is no Save step, and every change
+  writes an Audit Trail line naming the Sysop, the section and the setting.
+- **Help everywhere.** `?` at any prompt explains that setting, `H n` in a
+  section explains setting *n*, and `H` alone is a quick-start guide.
+- **The menu says when a setting cannot work yet**, for example
+  `Block direct connections  YES (inactive: no proxy listed)`, in red beside
+  its value. Values are coloured by state, and list sections show how many
+  entries are in use.
+- **Menu item.** A BBS menu item that runs the module with the command line
+  `MENU=SYSOPMENU` opens the same menu (MASTER access, as for `/TIP`).
+- A `0.0.0.0/0` proxy or whitelist entry is refused instead of being stored as
+  empty.
+
+### Added — Longer lists
+
+- **10 trusted proxies each for telnet and SSH** (was 2).
+- **50-entry IPv4 whitelist** (was 10), shown 10 to a page; `N`/`P` turn the
+  page and any entry's number works from any page.
+
+### Added — IPv6
+
+- **IPv6 callers behind a proxy are fully supported.** A `PROXY TCP6` header is
+  parsed and the caller's real IPv6 address is used everywhere the real IPv4
+  address is: `/myip`, `/whoson`, the Audit Trail and `LOGINS` log, GeoIP
+  lookups, and the per-IP connection limit (two IPv6 users are two people, not
+  one proxy address). IPv4-mapped addresses (`::ffff:1.2.3.4`) are treated as
+  IPv4.
+- **User-profile IP recording for IPv6.** The profile field receives the full
+  address, or its `/64` prefix when the full address does not fit the field's
+  29 characters — never a truncated address.
+- **50-entry IPv6 whitelist** (address or CIDR, e.g. `2001:db8::/32`). An IPv6
+  caller whose real address matches is never subject to the connection limit.
+- Trusted proxy lists remain IPv4. The BBS listens on IPv4 only, so the hop from
+  the proxy to the BBS is always IPv4; the caller behind the proxy can be either.
+
+### Added — SSH
+
+- **The trusted-proxy policy is available for SSH, configured separately** on
+  the SSH Settings section: **Manage SSH connections** (the master switch, off
+  by default), **Require trusted proxy (block direct)**, **Trusted proxy
+  enforcement**, and **its own trusted proxy list**. Trusting a relay for telnet
+  does not trust it for SSH.
+- **PROXY protocol support for SSH.** With **Process PROXY protocol header** on,
+  the caller's real IP replaces the proxy's on SSH connections, exactly as for
+  telnet. Requires the SSH Server module (`SNSSH`) to load before `SNTIPCTL` in
+  `wgserv.cfg` (the default alphabetical order does).
+- **`prx_ssh_ready()` export.** A cooperating SSH server calls it to wait until
+  a PROXY header has fully arrived before reading, so a header split across
+  packets cannot break the SSH handshake.
+
+### Added — Users and staff
+
+- **`/myip`** — any user can see their own real (post-proxy) IP address.
+- **`/whoson`** — a staff who's-online table: user, connection type (`Telnet` /
+  `SSH`), real IP, current module and time on line. Callers still in the
+  post-login sequence (bulletins, ads) or new-account signup are included.
+  Access is set by the **Staff view key** (default `SYSOP`); SYSOP and MASTER
+  always have access.
+- **Text variables** for message text: `N!SNTIP`, `N!SNTIPSHORT` (long IPv6
+  shortened to first..last hextet), `N!SNTUSERID`, `N!SNTMODULE`, `N!SNTTOL`,
+  `N!SNTTIPCT` (connection type), `N!SNTVER` (running version), and
+  `N!SNTUSERS` / `N!SNTMAXIP` for the refusal messages. A name already taken by
+  another module is reported in the Audit Trail at startup.
+- **Debug trace log** (General Settings) writes a detailed trace to
+  `TOTALIPCONTROL\DEBUG\`, stamped with the running version on its first line.
+  It never records users' keystrokes.
+
+### Changed
+
+- **One message file block.** All text, including the whole settings menu, is
+  in one `LEVEL6` block of `SNTIPCTL.MSG` and can be reworded in the BBS's
+  message editor. `CLIMIT` and `IPGDNY` use `N!SNTUSERS` and `N!SNTMAXIP` in
+  place of `%s` and `%d`.
+- The MDF's `Online user manual:` names `SNTIPCTL.RLN`.
+- A missing `recv()` hook (usually `SNTIPCTL` loaded before `GALTNTD`) raises a
+  prominent startup warning naming the fix. A connect-time fallback keeps real-IP
+  detection working meanwhile, tagged `(fallback)` in the log.
+- The settings record is now version 13. The longer lists live in new records of
+  `SNTIPCTL.DAT`; the first 2 proxies per protocol and first 10 IPv4 entries are
+  also kept in the main record, so an earlier version still finds them.
+
+### Fixed
+
+- **Board crash (`OVERSIZED SPR() CALL`)** when the per-module gateway refused a
+  user while several users were active from the same IP. Every Audit Trail line
+  the module writes is now length-bounded, and runtime text is never used as a
+  format string.
+- **Real IP lost while WorldLink was connected.** The telnet server could read
+  and consume the PROXY header before the module's connect handler ran; the busier
+  the board, the more often. The header is now captured at that first read and
+  applied as soon as the channel is known.
+- **SSH connections through a PROXY-protocol front end failing intermittently**
+  (as often as eleven tries in twelve).
+- **Refusing a connection paused the whole board for half a second**, on every
+  refused connection — with block-direct on, that is every port scanner. The
+  refusal message is now also delivered reliably instead of being lost to a
+  connection reset.
+- **Log writing stalled the board** (an open/close per line, slowed further by
+  on-access virus scanners). Log files are now held open.
+- A client that disconnected while a PROXY header was expected could leave the
+  reading daemon spinning.
+- `/myip` and `/whoson` could show a stale address from an earlier connection on
+  the same channel.
+- A PROXY header captured for a connection that never completed could be applied
+  to a later connection that reused the same socket handle.
+
 ## [1.1.2] — 2026-07-08
 
 ### Added — GeoIP provider

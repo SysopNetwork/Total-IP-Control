@@ -1,8 +1,12 @@
+/* SNTIPCTL.RC - Windows version resource for SNTIPCTL.DLL */
+/* The version numbers come from SNTVER.H, the single source of truth. */
+
 #include <windows.h>
+#include "SNTVER.H"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION     1,1,2,0
- PRODUCTVERSION  1,1,2,0
+ FILEVERSION     SNTVER_NUMS
+ PRODUCTVERSION  SNTVER_NUMS
  FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 #ifdef _DEBUG
  FILEFLAGS       0x1L
@@ -19,12 +23,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Sysop Network"
             VALUE "FileDescription",  "Total IP Control for The Major BBS v10"
-            VALUE "FileVersion",      "1.1.2.0"
-            VALUE "InternalName",     "SNTIPCTL"
-            VALUE "LegalCopyright",   "Copyright \251 2026 Sysop Network"
+            VALUE "FileVersion",      SNTVER_DOTTED
+            VALUE "InternalName",     SNTMODNAME
+            VALUE "LegalCopyright",   SNTCOPYRIGHT
             VALUE "OriginalFilename", "SNTIPCTL.DLL"
-            VALUE "ProductName",      "Total IP Control"
-            VALUE "ProductVersion",   "1.1.2.0"
+            VALUE "ProductName",      SNTPRODUCT
+            VALUE "ProductVersion",   SNTVER_STR
         END
     END
     BLOCK "VarFileInfo"

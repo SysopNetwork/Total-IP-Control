@@ -47,10 +47,8 @@ Open `SNTIPCTL.sln`, set Configuration to **Release** and Platform to
 | Release | `BUILD\Release\` |
 | Debug | `BUILD\Debug\` |
 
-The post-build step copies `SNTIPCTL.MDF` and the message **source**
-(`SNTIPCTL.MSG`) next to the DLL in the output directory. The copied message
-file still uses the bare-`[` source form and is **not** the deployable copy —
-see *Message File Packaging* below.
+The post-build step copies `SNTIPCTL.MSG` and `SNTIPCTL.MDF` next to the DLL,
+so `BUILD\Release\` holds a matched, deployable set.
 
 ## Compiler Flags
 
@@ -78,28 +76,31 @@ the GeoIP location feature. `galtcpip_lib.lib` is intentionally **not** linked.
 `_tcpipinf` is resolved at runtime via `GetProcAddress`, which avoids a DLL load
 failure from an ordinal mismatch on production servers.
 
-## Message File Packaging
+## Message File
 
-The message **source** (`SRC\DIST\SNTIPCTL.MSG`) uses a bare `[` for every ANSI
-sequence so it can be edited and previewed safely. The deployable message file
-requires the real ANSI escape byte (`0x1B`) before each `[`, and CRLF line
-endings.
+`SRC\SNTIPCTL.MSG` is the deployable file itself: binary CP437 with real ESC
+bytes (`0x1B`) before every ANSI `[`, `0x01` text-variable markers, and CRLF line
+endings. There is no conversion step. Edit it with a binary-safe tool (or a
+script that reads and writes bytes) and keep it in the repository as the source
+of truth — the BBS's own message editor strips trailing spaces from prompts.
+`.gitattributes` marks `*.MSG` binary so git never converts its line endings.
 
-When staging a release, convert the source into the deployable form rather than
-copying it verbatim:
+All messages are in one `LEVEL6` block, and code finds a message by its position
+in the file (`SNTIPCTL.H`). **Append** a new message at the end; inserting one
+renumbers every message after it. Dynamic values are named text variables
+(`N!SNT...`), never `printf`-style arguments, and a literal `%` must be written
+`%%`.
 
-```powershell
-$src = "SRC\DIST\SNTIPCTL.MSG"
-$dst = "DIST\1.1.0\SNTIPCTL.MSG"
-$raw = [System.IO.File]::ReadAllText($src, [System.Text.Encoding]::Latin1)
-$raw = $raw -replace '(?<!\x1b)\[', "`e["            # bare [ -> ESC [ (skip any already-escaped)
-$raw = $raw -replace '\r\n', "`n" -replace '\r', "`n" -replace '\n', "`r`n"   # normalize to CRLF
-[System.IO.File]::WriteAllText($dst, $raw, [System.Text.Encoding]::Latin1)
+## Tests
+
+```
+TESTS\RUNTESTS.CMD
 ```
 
-Use the Latin1 encoding so `0x1B` and any high-bit bytes round-trip unchanged.
-After conversion, the count of `0x1B` bytes should equal the count of `[` bytes,
-with no doubled escapes.
+Builds and runs `BUILD\TESTS\EDTEST.EXE`: the `/TIP` settings table and its
+value logic, compiled straight out of `SRC\SNTIPCTL.C`, checked against every
+kind of setting (yes/no and lists stored as `GBOOL` or `INT`, numbers, key names,
+text, IPv4 and IPv6 ranges). No BBS is needed. Exit code 0 = all passed.
 
 ## Release Packaging
 
@@ -110,18 +111,45 @@ uppercase extensions.
 |---|---|
 | `SNTIPCTL.DLL` | `BUILD\Release\SNTIPCTL.DLL` |
 | `SNTIPCTL.MDF` | `BUILD\Release\SNTIPCTL.MDF` |
-| `SNTIPCTL.MSG` | Converted from `SRC\DIST\SNTIPCTL.MSG` (see above) |
+| `SNTIPCTL.MSG` | `BUILD\Release\SNTIPCTL.MSG` (a copy of `SRC\SNTIPCTL.MSG`) |
+| `SNTIPCTL.RLN` | Release notes / manual for this version (the MDF's online manual) |
 
 `SNTIPCTL.DAT` (the settings record) is created automatically by the module on
 first run and is **not** shipped.
 
+## Where the Version Number Lives
+
+`SRC\SNTVER.H` is the only place the version lives. The C code
+(`SNTIPCTL_VERSION`: the Audit Trail line at boot, the debug trace's first line,
+and `N!SNTVER` on the `/TIP` screens) and `SRC\SNTIPCTL.RC` (the DLL's
+FileVersion/ProductVersion in Explorer) both take it from there, so they cannot
+disagree.
+
+| Define | Example | Used for |
+|---|---|---|
+| `SNTVER_STR` | `2.0.0` | Shown to sysops |
+| `SNTVER_DOTTED` | `2.0.0.0` | Windows FileVersion string |
+| `SNTVER_NUMS` | `2,0,0,0` | Windows FILEVERSION numbers |
+
+A version names exactly one binary: bump it for every build that leaves this
+machine, never rebuild under a number already committed or shared.
+
+**Do not type a version number into `SNTIPCTL.MSG`.** Use `N!SNTVER`; a typed
+version goes stale with the first DLL-only build.
+
 ## Release Checklist
 
 - [ ] Build passes with no errors or warnings in Release|Win32
-- [ ] Version number updated in `SRC\SNTIPCTL.RC` (FileVersion, ProductVersion)
+- [ ] Version bumped in `SRC\SNTVER.H` — never reuse a version already
+      committed or shared, even for a rebuild
+- [ ] `TESTS\RUNTESTS.CMD` passes
+- [ ] `/TIP` header verified against the new build (it should follow the DLL
+      automatically via `N!SNTVER`; if it shows a literal version, someone typed
+      one into the `.MSG`)
 - [ ] `CHANGELOG.MD` entry written for the release version
-- [ ] `DIST\<version>\` populated with DLL, MDF, and the **converted** MSG
-- [ ] Deployed MSG verified: `0x1B` count equals `[` count, no doubled escapes
+- [ ] `DIST\<version>\` populated with DLL, MDF, MSG and RLN
+- [ ] If the MSG changed, the RLN says so (installing it resets any text the
+      Sysop customised in the BBS's message editor)
 - [ ] DLL metadata verified (Explorer → Properties → Details)
 - [ ] `README.MD` and `TECHNICAL.MD` accurate to this build
 - [ ] Repository audited: no credentials, no local paths, and no internal-only
@@ -132,7 +160,10 @@ first run and is **not** shipped.
 1. Copy the `DIST\<version>\` contents to the BBS installation directory.
 2. If replacing `PROXCLIP` or `IPCTRL`, remove those module lines from
    `wgserv.cfg`.
-3. Restart the BBS and confirm the startup log shows `SNTIPCTL` initializing
+3. `SNTIPCTL` must load **after** `GALTNTD` in `wgserv.cfg` (it chains `hdlcon`),
+   and — for SSH PROXY header support — **after** the SSH Server module `SNSSH`,
+   whose `ssh.dll` it patches. The default alphabetical order satisfies both.
+4. Restart the BBS and confirm the startup log shows `SNTIPCTL` initializing
    with the expected feature set.
 
 ---

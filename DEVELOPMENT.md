@@ -58,10 +58,12 @@ MBBS v10 modules are single- or minimal-file C implementations compiled as
 - **Hook-based interception:** patch `hdlcon` and the `recv()` IAT to intercept
   socket data before the BBS processes it.
 - **Configuration:** a Btrieve settings record (`SNTIPCTL.DAT`), created at
-  runtime and editable live; display text and editor templates live in a
-  message file (`SNTIPCTL.MSG` → `SNTIPCTL.MCV`).
-- **Online config:** a Sysop menu (`/TOTALIP`) for view/modify/save/apply
-  without a BBS restart, implemented natively with MBBS v10 SDK patterns.
+  runtime and editable live; all screen text lives in one LEVEL6 block of the
+  message file (`SNTIPCTL.MSG` → `SNTIPCTL.MCV`), with dynamic values passed as
+  named text variables.
+- **Online config:** a numbered Sysop settings menu (`/TIP`) — type a
+  setting's number, see its value and what is allowed, type the new one.
+  Changes apply at once, are saved, and are noted in the Audit Trail.
 
 ### Features
 
@@ -95,16 +97,15 @@ MBBS v10 modules are single- or minimal-file C implementations compiled as
 /
 ├── SRC/              # All source code
 │   ├── SNTIPCTL.C
-│   ├── SNTIPCTL.H
+│   ├── SNTIPCTL.H           # Message numbers, setting constants
+│   ├── SNTVER.H             # The version number (C code and .RC)
+│   ├── SNTIPCTL.MSG         # Message file, deployable as-is (ESC, CRLF)
+│   ├── SNTIPCTL.MDF         # Module descriptor
 │   ├── SNTIPCTL.RC          # Windows version resource
 │   ├── SNTIPCTL.vcxproj
-│   ├── SNTIPCTL_EXP.DEF
-│   └── DIST/                # Module descriptor + message source
-│       ├── SNTIPCTL.MDF
-│       └── SNTIPCTL.MSG
-├── DIST/<version>/   # Deployable files (DLL, MDF, MSG)
-├── DOCS/ADR/         # Architecture Decision Records
-├── TESTS/
+│   └── SNTIPCTL_EXP.DEF
+├── DIST/<version>/   # Deployable files (DLL, MDF, MSG, RLN)
+├── TESTS/            # RUNTESTS.CMD: host-side settings-editor test
 ├── TOOLS/
 ├── BUILD/            # Build output (not committed)
 ├── README.MD
@@ -139,7 +140,6 @@ features:
 - `CHANGELOG.MD` — added/changed/fixed/breaking per release
 - `BUILDING.MD` — toolchain, SDK setup, build and packaging steps
 - `DEVELOPMENT.md` — this file
-- `DOCS/ADR/` — one ADR per significant design decision
 
 ---
 

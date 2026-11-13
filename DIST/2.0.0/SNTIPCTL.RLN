@@ -1,0 +1,79 @@
+Total IP Control v2.0.0
+Copyright (c) 2026 Sysop Network
+
+Total IP Control restores real caller IPs from a reverse proxy, enforces
+per-IP connection limits, records caller IPs and GeoIP locations to user
+profiles, and keeps a full audit trail -- all set up live from the BBS.
+
+  This release replaces ALL FOUR files: SNTIPCTL.DLL, SNTIPCTL.MSG,
+  SNTIPCTL.MDF and SNTIPCTL.RLN. Install them together.
+
+
+What is new in 2.0.0:
+  * /TIP replaces /TOTALIP and the old full-screen forms. Settings are
+    in six sections (General, Telnet Trusted Proxies, IPv4 Whitelist,
+    IPv6 Whitelist, GeoIP Location, SSH Settings). Pick a section, pick
+    a setting by number, type the new value. Every change applies and
+    saves at once and leaves an Audit Trail line. ? explains a setting,
+    H is a quick-start guide, X goes back.
+
+  * The same menu opens from a BBS menu item whose command line is:
+
+       MENU=SYSOPMENU
+
+    Give the item a Sysop key. MASTER access is needed, as for /TIP.
+
+  * 10 trusted proxies each for telnet and SSH, and 50-entry IPv4 and
+    IPv6 whitelists (10 to a page; N and P turn the page).
+
+  * Full IPv6 caller support behind a proxy (PROXY TCP6): the real IPv6
+    address is used by /MYIP, /WHOSON, the logs, GeoIP, the connection
+    limit and the user profile. Trusted proxies stay IPv4 -- the BBS
+    listens on IPv4, so the proxy always reaches it over IPv4.
+
+  * SSH: its own trusted-proxy policy and PROXY header support, set up
+    separately from telnet (off until you turn it on).
+
+  * /MYIP shows any caller their real IP. /WHOSON shows staff who is on,
+    with connection type, real IP, module and time on line.
+
+  * Text variables for your own messages: N!SNTIP, N!SNTIPSHORT,
+    N!SNTUSERID, N!SNTMODULE, N!SNTTOL, N!SNTTIPCT, N!SNTVER.
+
+  * Debug trace log (General Settings) for troubleshooting, written to
+    TOTALIPCONTROL\DEBUG\.
+
+Fixed since 1.1.2:
+  * A board crash (OVERSIZED SPR() CALL) when the module gateway refused
+    a user while several users were on from the same IP.
+  * Real IPs lost while WorldLink was connected.
+  * SSH connections through a PROXY front end failing intermittently.
+  * Every refused connection froze the board for half a second; the
+    refusal message is now also delivered reliably.
+  * Log writing could stall the board; log files are now kept open.
+
+
+Installing:
+  1. Stop the BBS.
+  2. Copy SNTIPCTL.DLL, SNTIPCTL.MSG, SNTIPCTL.MDF and SNTIPCTL.RLN into
+     your BBS installation directory (typically C:\BBSV10), replacing
+     any older copies.
+  3. Remove PROXCLIP and IPControl (IPCTRL) if you still run them.
+  4. Restart. The Audit Trail at start-up reports v2.0.0.
+  5. Type /TIP as a Master user and set it up.
+
+Upgrading from 1.x:
+  Your settings carry over unchanged. Every message in SNTIPCTL.MSG is
+  new, so if you reworded any Total IP Control message (CLIMIT, PRXBLK,
+  IPGDNY, ...) in the message editor, note your text before installing
+  and redo it afterwards. In CLIMIT and IPGDNY use N!SNTUSERS where %s
+  was and N!SNTMAXIP where %d was.
+
+Load order (wgserv.cfg):
+  SNTIPCTL must load after GALTNTD, and after SNSSH if you use SSH. The
+  usual alphabetical order already does this; if not, the Audit Trail
+  says so at start-up.
+
+
+Total IP Control is developed and maintained by Mark Laudenbach at
+Sysop Network. R&D and testing by Gregory McGill.

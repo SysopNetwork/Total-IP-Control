@@ -5,122 +5,104 @@
  *   Centralized IP management, proxy detection, connection control,       *
  *   and audit logging for The Major BBS v10.                              *
  *                                                                         *
- *   Total IP Control is developed and maintained by Mark Laudenbach       *
- *   at Sysop Network.                                                     *
+ *   Copyright (c) 2026 Sysop Network.  All Rights Reserved.               *
  *                                                                         *
- *   Copyright (c) 2026 Sysop Network.  All Rights Reserved.              *
+ *   Message numbers for SNTIPCTL.MSG.                                     *
+ *                                                                         *
+ *   Code finds a message by its position in the .MSG file.  The file     *
+ *   starts with its only LEVEL6 marker, which takes no number, so the     *
+ *   first message is 1.  New messages must be APPENDED at the end of the  *
+ *   .MSG: inserting one renumbers every message after it.                 *
  *                                                                         *
  ***************************************************************************/
 
 #ifndef SNTIPCTL_H
 #define SNTIPCTL_H
 
-/* Maximum number of trusted proxy CIDR entries that can be configured. */
-#define SNTIPCTL_MAX_TRUSTED   2
+/* Number of trusted proxy entries per protocol (telnet, SSH). */
+#define SNTIPCTL_MAX_TRUSTED    10
 
-/* Maximum number of connection-limit whitelist CIDR entries. */
-#define SNTIPCTL_MAX_WHITELIST 10
+/* Number of IPv4 connection-limit whitelist entries. */
+#define SNTIPCTL_MAX_WHITELIST  50
+
+/* Number of IPv6 connection-limit whitelist entries. */
+#define SNTIPCTL_MAX_WHITELIST6 50
+
+/* ---- Messages shown to callers ---- */
+#define CLIMIT       1             /* refused: too many connections per IP */
+#define PRXBLK       2             /* refused: direct connection, proxy    */
+                                   /*   required                           */
+#define IPGDNY       3             /* gateway: too many from this IP       */
+#define IPGGNT       4             /* gateway: access granted (optional)   */
+#define MYIP         5             /* /MYIP                                */
+#define WHOHDR       6             /* /WHOSON header                       */
+#define WHOROW       7             /* /WHOSON one user                     */
+#define NOACCESS     8             /* no access: /WHOSON, /TIP, settings   */
+
+/* ---- /TIP and MENU=SYSOPMENU settings editor ---- */
+#define TOPHDR       9             /* section list header                  */
+#define TOPROW      10             /* one section                          */
+#define TOPFTR      11             /* section list commands                */
+#define TOPPRMT     12             /* section list prompt                  */
+#define MAINHDR     13             /* section header                       */
+#define SETROW      14             /* one settings row                     */
+#define MAINFTR     15             /* section commands                     */
+#define MAINFTRP    16             /* section commands, paged section      */
+#define PROMPT      17             /* section prompt                       */
+#define ASKVAL      18             /* prompt for a new value               */
+#define SAVED       19             /* setting saved                        */
+#define BADVAL      20             /* value rejected                       */
+#define BADSEL      21             /* unknown menu choice                  */
+#define LEAVE       22             /* leaving the editor                   */
+#define CHOICES     23             /* a list setting: its current value    */
+#define CHOICEP     24             /* a list setting: the prompt           */
+#define CHROW       25             /* one choice in a setting's list       */
+#define HELPMENU    26             /* quick-start help (H)                 */
+
+/* ---- Help for each setting (? at its prompt, or H n in a section) ---- */
+#define HCONLIM     27             /* Connection limit                     */
+#define HMAXCON     28             /* Max connections per IP               */
+#define HBYPASS     29             /* Limit bypass key                     */
+#define HSTAFF      30             /* Staff key for /WHOSON                */
+#define HLOGMODE    31             /* Audit logging                        */
+#define HDEBUG      32             /* Debug trace log                      */
+#define HUIPON      33             /* Record IP in profile                 */
+#define HUIPFLD     34             /* Profile field for IP                 */
+#define HPRXTRU     35             /* Telnet: trusted proxy only           */
+#define HPRXBLK     36             /* Telnet: block direct connections     */
+#define HPRXIP      37             /* Telnet trusted proxy 1-2             */
+#define HSSHMAN     38             /* SSH: manage connections              */
+#define HSSHHDR     39             /* SSH: read PROXY header               */
+#define HSSHTRU     40             /* SSH: trusted proxy only              */
+#define HSSHBLK     41             /* SSH: block direct connections        */
+#define HSSHIP      42             /* SSH trusted proxy 1-2                */
+#define HWL4        43             /* IPv4 whitelist 1-10                  */
+#define HWL6        44             /* IPv6 whitelist 1-10                  */
+#define HGEOON      45             /* GeoIP lookups                        */
+#define HGEOPRV     46             /* GeoIP provider                       */
+#define HGEOHOST    47             /* API host                             */
+#define HGEOKEY     48             /* API key                              */
+#define HGEOTLS     49             /* Use HTTPS                            */
+#define HGEOTMO     50             /* Lookup timeout                       */
+#define HGEORTY     51             /* Retries on failure                   */
+#define HGEOCACH    52             /* Cache                                */
+#define HGEODUR     53             /* Cache duration                       */
+#define HGEOLOG     54             /* GeoIP log level                      */
+#define HGEOMODE    55             /* Write mode                           */
+#define HGEOFLD     56             /* City/state field                     */
+#define HGEOCFLD    57             /* Country field                        */
+#define HGEOCFMT    58             /* Country format                       */
+#define HGEORFMT    59             /* State format                         */
+#define HGEOFMT     60             /* Location format                      */
 
 /*
- * Message slot numbers derived from SNTIPCTL.MSG.
- * LEVEL6 display messages (slots 1-8); LEVEL99 marker occupies slot 9;
- * FSE form templates are slots 10-13.  All slots are sequential across
- * the entire MSG file including LEVEL section markers.
- */
-
-/* ---- LEVEL6 display messages ---- */
-#define CLIMIT      1    /* Connection limit exceeded message (T)          */
-#define CFGHED      2    /* Config editor header                           */
-#define CFGMNU      3    /* Config top-level menu [1][2][3][4][X]          */
-#define CFGSAV      4    /* "Settings saved"                               */
-#define CFGDNY      5    /* "Access denied"                                */
-#define CFGBAD      6    /* "Invalid input"                                */
-#define IPGDNY      7    /* Gateway denial message (%d = max allowed)      */
-#define IPGGNT      8    /* Gateway granted message (optional, blank=off)  */
-
-/* ---- LEVEL99 FSE form templates ---- */
-/* NOTE: The LEVEL99 marker itself occupies slot 9; forms start at 10.     */
-#define SNTCFG_GEN  10   /* General settings FSE form                      */
-#define SNTCFG_PRX  11   /* Trusted proxy CIDR FSE form                    */
-#define SNTCFG_WL   12   /* Connection limit whitelist FSE form (10 slots) */
-
-/* ---- Additional LEVEL99-section display message ---- */
-/* Placed after the FSE forms so adding it does not renumber slots 1-12.   */
-#define PRXBLK      13   /* "Direct connection refused" (require-proxy)     */
-
-/* ---- GeoIP Location FSE form (v1.1.0) ---- */
-/* Appended after PRXBLK so existing slots 1-13 are never renumbered.      */
-#define SNTCFG_GEO  14   /* GeoIP Location settings FSE form               */
-
-/*
- * FSE field numbers -- General Settings form (SNTCFG_GEN).
- * Fields are numbered 0-based in declaration order from gen_fsp[].
- */
-#define GEN_PRXTRU  0    /* Trusted proxy enforcement (ALT=NO/YES)         */
-#define GEN_PRXBLK  1    /* Require trusted proxy / block others (ALT=NO/YES)*/
-#define GEN_CONLIM  2    /* Global connection limit (ALT=NO/YES)           */
-#define GEN_MAXCON  3    /* Max connections per IP (MIN=1 MAX=1000)        */
-#define GEN_LOGON   4    /* Audit logging (ALT=NO/AUDIT/LOG/BOTH)          */
-#define GEN_UIPON   5    /* User profile IP recording (ALT=NO/YES)         */
-#define GEN_UIPFLD  6    /* Profile field number (MIN=1 MAX=5)             */
-#define GEN_BYPKEY  7    /* Bypass key name (text)                         */
-#define GEN_DONE    8    /* Action selector (ALT=SAVE/QUIT)                */
-
-/*
- * Audit-logging mode (stored in config; spacebar-cycled in the editor as the
- * GEN_LOGON multichoice).  Values are the 0-based ALT ordinals so fsdord()
- * maps directly.  Two independent sinks: the BBS Audit Trail (live sysop log,
- * written via shocst) and daily log files under TOTALIPCONTROL\.
+ * Audit-logging mode.  Two independent sinks: the BBS Audit Trail (live sysop
+ * log, written via shocst) and daily log files under TOTALIPCONTROL\.
  */
 #define LOGM_OFF    0    /* no Audit Trail, no log files                   */
 #define LOGM_AUDIT  1    /* BBS Audit Trail only (shocst), no files        */
 #define LOGM_LOG    2    /* daily log files only, no Audit Trail lines     */
 #define LOGM_BOTH   3    /* Audit Trail + log files                        */
-
-/*
- * FSE field numbers -- Trusted Proxy CIDR form (SNTCFG_PRX).
- */
-#define PRX_PRX1    0    /* Trusted proxy CIDR #1                          */
-#define PRX_PRX2    1    /* Trusted proxy CIDR #2                          */
-#define PRX_DONE    2    /* Action selector (ALT=SAVE/QUIT)                */
-
-/*
- * FSE field numbers -- Whitelist form (SNTCFG_WL).
- */
-#define WL_WL1      0    /* Whitelist CIDR #1                              */
-#define WL_WL2      1    /* Whitelist CIDR #2                              */
-#define WL_WL3      2    /* Whitelist CIDR #3                              */
-#define WL_WL4      3    /* Whitelist CIDR #4                              */
-#define WL_WL5      4    /* Whitelist CIDR #5                              */
-#define WL_WL6      5    /* Whitelist CIDR #6                              */
-#define WL_WL7      6    /* Whitelist CIDR #7                              */
-#define WL_WL8      7    /* Whitelist CIDR #8                              */
-#define WL_WL9      8    /* Whitelist CIDR #9                              */
-#define WL_WL10     9    /* Whitelist CIDR #10                             */
-#define WL_DONE     10   /* Action selector (ALT=SAVE/QUIT)                */
-
-/*
- * FSE field numbers -- GeoIP Location form (SNTCFG_GEO).
- * Order must match geo_fsp[] / geo_fmt[] in SNTIPCTL.C and the field marker
- * runs in the SNTCFG_GEO template.
- */
-#define GEO_ENABLE    0  /* GeoIP lookups on/off (ALT=NO/YES)             */
-#define GEO_WRITEMODE 1  /* COMBINED (one field) vs SPLIT (city/state + country) */
-#define GEO_FIELD     2  /* City/State field (MIN=1 MAX=5)                */
-#define GEO_CTYFLD    3  /* Country field, SPLIT mode (MIN=1 MAX=5)       */
-#define GEO_CTYFMT    4  /* Country format (ALT=FULL/CODE)               */
-#define GEO_REGFMT    5  /* State/region format (ALT=CODE/FULL)          */
-#define GEO_PROVIDER  6  /* GeoIP provider (ALT=IPWHO.IS/IP-API.COM/IPAPI.CO/IPINFO.IO) */
-#define GEO_HOST      7  /* API host name (text)                          */
-#define GEO_KEY       8  /* API key/token, blank for keyless free tier    */
-#define GEO_HTTPS     9  /* Use HTTPS (ALT=YES/NO)                        */
-#define GEO_TIMEOUT  10  /* Per-request timeout seconds (MIN=1 MAX=60)    */
-#define GEO_CACHE    11  /* Cache mode (ALT=OFF/TIME/IP)                  */
-#define GEO_CACHEDUR 12  /* Cache duration in minutes (MIN=1 MAX=44640)   */
-#define GEO_RETRY    13  /* Retries on failed lookup (MIN=0 MAX=5)        */
-#define GEO_LOGLVL   14  /* Log level (ALT=OFF/ERRORS/NORMAL/VERBOSE)     */
-#define GEO_FORMAT   15  /* Location format template (text)               */
-#define GEO_DONE     16  /* Action selector (ALT=SAVE/QUIT)               */
 
 /* GeoIP provider identifiers (stored in config). */
 #define GEOPRV_IPWHOIS  0  /* ipwho.is / ipwhois.io (default)             */
@@ -141,10 +123,10 @@
 #define GEORF_FULL      1  /* full subdivision name, e.g. "Minnesota"     */
 
 /*
- * GeoIP cache mode (chosen on the form; stored as two flags -- see
+ * GeoIP cache mode, as chosen in the editor; stored as two flags (see
  * geoip_cache_on / geoip_cache_bytime).  OFF = no caching; TIME = cache and
- * re-look-up after the cache duration expires; IP = cache per IP for the BBS
- * uptime so a repeat IP is never looked up again (the duration is ignored).
+ * look up again after the cache duration; IP = cache each IP for as long as
+ * the BBS runs (the duration is ignored).
  */
 #define GEOCM_OFF       0  /* caching disabled                            */
 #define GEOCM_TIME      1  /* time-based expiry (cache duration)          */
@@ -155,13 +137,5 @@
 #define GEOLOG_ERRORS   1  /* API errors / rate limiting / failures only  */
 #define GEOLOG_NORMAL   2  /* + successful lookups and profile updates    */
 #define GEOLOG_VERBOSE  3  /* + cache hits/misses and enqueue activity    */
-
-/*
- * Sub-states for the online config editor sttrou (stored in usrptr->substt).
- * substt == 0 is reserved for BBS menu gateway use (sntipctl_gateway).
- * The menu is displayed in sntipctl_gbl before returning 1; sttrou absorbs
- * MBBS's spurious re-invocation via the '/' guard in CFGSTT_MENU.
- */
-#define CFGSTT_MENU    1  /* Top-level menu -- awaiting 1/2/3/X input        */
 
 #endif /* SNTIPCTL_H */

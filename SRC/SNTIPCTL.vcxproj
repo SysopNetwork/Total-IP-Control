@@ -107,13 +107,13 @@
       <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)DIST\SNTIPCTL.MDF" "$(OutDir)SNTIPCTL.MDF"
-copy /Y "$(ProjectDir)DIST\SNTIPCTL.MSG" "$(OutDir)SNTIPCTL.MSG"</Command>
-      <Message>Copying installable files to output folder</Message>
+      <Command>copy /Y "$(ProjectDir)SNTIPCTL.MSG" "$(OutDir)" &gt;nul &amp;&amp; copy /Y "$(ProjectDir)SNTIPCTL.MDF" "$(OutDir)" &gt;nul</Command>
+      <Message>Copy the matching .MSG and .MDF next to the DLL</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="SNTIPCTL.H" />
+    <ClInclude Include="SNTVER.H" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SNTIPCTL.C" />
@@ -122,8 +122,8 @@ copy /Y "$(ProjectDir)DIST\SNTIPCTL.MSG" "$(OutDir)SNTIPCTL.MSG"</Command>
     <ResourceCompile Include="SNTIPCTL.rc" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="DIST\SNTIPCTL.MDF" />
-    <None Include="DIST\SNTIPCTL.MSG" />
+    <None Include="SNTIPCTL.MDF" />
+    <None Include="SNTIPCTL.MSG" />
     <None Include="SNTIPCTL_EXP.DEF" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

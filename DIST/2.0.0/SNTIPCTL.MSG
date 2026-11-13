@@ -1,0 +1,414 @@
+
+
+LEVEL6 {Total IP Control}
+
+
+CLIMIT {[0m[1;31m
+  Connection Limit Exceeded -- Too many simultaneous connections from your IP.
+
+  You have reached the maximum number of connections allowed from your
+  IP address.  Please try again later.
+
+  User(s) from your IP already connected: [1;33mN!SNTUSERS[1;31m
+[0m
+} T Refused: too many connections from one IP
+
+
+PRXBLK {[0m[1;31m
+  Connection Refused -- This system only accepts connections relayed
+  through an authorized proxy.  Direct connections are not permitted.
+
+  If you believe you are reaching this in error, contact the Sysop.
+[0m
+} T Refused: direct connection when a proxy is required
+
+
+IPGDNY {[0m[1;31m
+  IP connection limit reached.  Only N!SNTMAXIP simultaneous connection(s) from
+  your IP address are allowed in this area.  Please try again later.
+
+  User(s) from your IP currently in this area: [1;33mN!SNTUSERS[1;31m
+[0m
+} T Gateway: too many connections from one IP in this area
+
+
+IPGGNT {} T Gateway: access granted (leave blank for no message)
+
+
+MYIP {[0m
+  Your IP address is [1;33mN!SNTIP[0m.
+[0m
+} T /MYIP: the caller's own IP address
+
+
+WHOHDR {[0m[1;37m
+  Users online:[0m
+  [1;30m-----------------------------------------------------------------[0m
+  [1;37mUser           Type   IP              Module              TOL[0m
+  [1;30m-----------------------------------------------------------------[0m
+} T /WHOSON header
+
+
+WHOROW {[0m  [1;37mL/SNTUSERID[0m[1;35mL'SNTTIPCT[0m[1;33mL0SNTIPSHORT[0m[1;36mL4SNTMODULE[0m[1;32mL'SNTTOL[0m
+} T /WHOSON one user
+
+
+NOACCESS {[0m
+  [1;31mAccess denied.[0m  This command is for the Sysop and staff only.
+
+} T /WHOSON, /TIP or the settings menu without access
+
+
+TOPHDR {[1;36mษออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออป
+[1;36mบ [1;37mTotal IP Control [0;36mL0SNTVER          [0;36mchanges apply at once [1;36mบ
+[1;36mศออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออผ
+[0m Status: [1;33mN!SNTSTATUS[0m
+
+} T Settings: section list header
+
+
+TOPROW {  [1;33mR"SNTSECNUM[0;33m.[1;32m L<SNTSECNAME[0;36mN!SNTSECINFO[0m
+} T Settings: one section
+
+
+TOPFTR {
+   [1;33mH[0;33m.[0;32m Help     [1;33mX[0;33m.[0;32m Exit[0m
+} T Settings: section list commands
+
+
+TOPPRMT {
+[1;37mSection to change[0m (1-N!SNTSECCNT, H or X): } T Settings: section list prompt
+
+
+MAINHDR {[1;36mษออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออป
+[1;36mบ [1;37mTotal IP Control [0;36m- [1;33mL8SNTSECNAME         [0;36mR,SNTPAGE [1;36mบ
+[1;36mศออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออผ
+} T Settings: section header
+
+
+SETROW { [1;33mR"SNTROWNUM[0;33m.[0;37m L:SNTROWNAME N!SNTROWCLRN!SNTROWVAL [0;31mN!SNTROWNOTE[0m
+} T Settings: one setting (value colour from N!SNTROWCLR)
+
+
+MAINFTR {[0;36mฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤ
+   [1;33mH[0;33m.[0;32m Help     [1;33mX[0;33m.[0;32m Back to the sections[0m
+} T Settings: section commands
+
+
+MAINFTRP {[0;36mฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤฤ
+   [1;33mN[0;33m.[0;32m Next page   [1;33mP[0;33m.[0;32m Previous page   [1;33mH[0;33m.[0;32m Help   [1;33mX[0;33m.[0;32m Back[0m
+} T Settings: section commands, paged section
+
+
+PROMPT {
+[1;37mSetting to change[0m (1-N!SNTSECCNT, N!SNTCMDS): } T Settings: section prompt
+
+
+ASKVAL {
+[1;37mN!SNTROWNAME[0m is now: [1;33mN!SNTROWVAL[0m
+[0;36mAllowed:[0m N!SNTHINT
+New value (blank = no change, ? = help): } T Prompt for a new setting value
+
+
+SAVED {[1;32m๛ N!SNTROWNAME saved.[0m
+} T Setting saved
+
+
+BADVAL {[1;31mNot accepted.[0m Allowed: N!SNTHINT
+} T Setting value rejected
+
+
+BADSEL {[1;31mUnknown choice.[0m Enter ? to see the list again.
+} T Unknown menu choice
+
+
+LEAVE {
+[0;36mLeaving Total IP Control settings.[0m
+} T Leaving the settings editor
+
+
+CHOICES {
+[1;37mN!SNTROWNAME[0m is now: [1;33mN!SNTROWVAL[0m
+} T A list setting: its current value
+
+
+CHOICEP {Choose 1-N!SNTCHNUM or type the name (blank = no change, ? = help): } T A list setting: the prompt
+
+
+CHROW {  [1;33mN!SNTCHNUM[0;33m.[1;37m L*SNTCHNAME [0;36mN!SNTCHDESC[0m
+} T A list setting: one choice
+
+
+HELPMENU {
+[1;37mQuick start[0m
+ [1;36mBehind a proxy[0m  In section 2 (telnet) or 6 (SSH), list your proxy and
+                 set Trusted proxy only to YES, so only it is believed.
+                 Block direct connections also turns away callers who
+                 skip the proxy.
+ [1;36mLimit per IP[0m    In section 1, set Connection limit to YES and Max
+                 connections per IP.  Sections 3 and 4 are never limited.
+ [1;36mGeoIP[0m           In section 5, set GeoIP lookups to YES; the defaults
+                 need no API key.
+
+ Pick a section, then a setting's number.  The whitelists show 10 entries
+ a page: N and P turn the page, and any entry's number works from any
+ page.  ? at a setting explains it; in a section, H and a number (H 2)
+ explains that setting.  - clears a key, text or address.  X goes back
+ one step.  Changes apply at once and are noted in the Audit Trail.
+} T Quick-start help (H)
+
+
+HCONLIM {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ YES: one IP address may have no more than Max connections per IP
+ sessions logged on at once.  The Sysop (SYSOP or MASTER key), holders
+ of the Limit bypass key and the addresses in the whitelists (sections
+ 3 and 4) are never limited.  A caller over the limit is shown why and
+ disconnected.
+} T Help: Connection limit
+
+
+HMAXCON {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ The most sessions one IP address may have logged on at the same time.
+ Used only when Connection limit is YES.
+} T Help: Max connections per IP
+
+
+HBYPASS {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ Users holding this BBS key are not limited by Connection limit.  SYSOP
+ and MASTER key holders never are.  - clears it.
+} T Help: Limit bypass key
+
+
+HSTAFF {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ Users holding this key may use /WHOSON, which lists who is online with
+ their real IP addresses.  SYSOP and MASTER key holders always can.
+ - clears it, leaving /WHOSON to the Sysop.
+} T Help: Staff key for /WHOSON
+
+
+HLOGMODE {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ Where connection events are recorded: the BBS Audit Trail, daily files
+ in the TOTALIPCONTROL folder of the BBS, both, or nowhere.  The files
+ also keep a log of every login with the caller's real IP address.
+} T Help: Audit logging
+
+
+HDEBUG {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ YES writes a detailed trace of every connection to
+ TOTALIPCONTROL\DEBUG, one file per hour, for troubleshooting.  It
+ grows quickly: turn it off when done.
+} T Help: Debug trace log
+
+
+HUIPON {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ YES writes each caller's real IP address into a field of their user
+ account at every logon, where it shows in the account editor.  Profile
+ field for IP picks the field.
+} T Help: Record IP in profile
+
+
+HUIPFLD {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ The user account field that receives the IP address.  The address
+ fields hold 29 characters, so a long IPv6 address is stored as its /64
+ network.  PHONE holds 15, too short for any IPv6 address.
+} T Help: Profile field for IP
+
+
+HPRXTRU {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ YES: a PROXY header is believed only when the connection comes from a
+ trusted proxy listed in this section.  Otherwise anyone could claim any
+ IP address, so turn this on once your proxy is listed.
+} T Help: Trusted proxy only
+
+
+HPRXBLK {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ YES: connections that do not come through a trusted proxy listed in
+ this section are refused (telnet callers see why, before the login
+ prompt).  Nothing is refused until a proxy is listed.  Local (127.x)
+ and IPv4 whitelist addresses are always let in.
+} T Help: Block direct connections
+
+
+HPRXIP {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ The proxy or load balancer in front of your telnet port, as an address
+ (10.0.0.5) or a range (10.0.0.0/24).  - clears it.
+} T Help: Trusted proxy
+
+
+HSSHMAN {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ YES applies the other settings in this section to SSH connections.  NO
+ leaves SSH alone; SSH logons are still logged and counted toward the
+ connection limit.
+} T Help: Manage SSH connections
+
+
+HSSHHDR {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ YES reads a PROXY header at the start of each SSH connection and uses
+ the real IP address in it.  Turn on only if your proxy sends one to the
+ SSH port.  Needs the SSH server module to load before Total IP Control;
+ if it did not, this takes effect after a restart.
+} T Help: Read PROXY header
+
+
+HSSHTRU {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ YES: an SSH PROXY header is believed only when the connection comes
+ from an SSH trusted proxy listed in this section.
+} T Help: Trusted proxy only
+
+
+HSSHBLK {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ YES: SSH connections that do not come through an SSH trusted proxy are
+ refused.  Nothing is refused until a proxy is listed.  Local (127.x)
+ and IPv4 whitelist addresses are always let in.
+} T Help: Block direct connections
+
+
+HSSHIP {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ The proxy in front of your SSH port, as an address or a range.  This
+ list is separate from the telnet one.  - clears it.
+} T Help: Trusted proxy
+
+
+HWL4 {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ An IPv4 address (192.168.1.10) or range (192.168.1.0/24) that is never
+ connection-limited and is let in when direct connections are blocked.
+ - clears it.
+} T Help: IPv4 whitelist
+
+
+HWL6 {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ An IPv6 address or range (2001:db8::/32) that is never
+ connection-limited.  - clears it.
+} T Help: IPv6 whitelist
+
+
+HGEOON {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ YES looks up each caller's approximate city, state and country from
+ their IP address at logon and saves it in their account.  Lookups run
+ in the background and never delay a logon.  Private and local
+ addresses are skipped.
+} T Help: GeoIP lookups
+
+
+HGEOPRV {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ The online service that answers lookups.  All four work without an API
+ key at low volume.  IP-API.COM's free service has no HTTPS, so HTTPS is
+ turned off for it unless an API key is set.
+} T Help: GeoIP provider
+
+
+HGEOHOST {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ Follows the provider.  Change it only for a provider's paid or
+ regional host.  - goes back to the provider's own host.
+} T Help: API host
+
+
+HGEOKEY {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ Your API key or token from the provider, for a paid plan or higher
+ limits.  Leave it clear for the free service.  - clears it.
+} T Help: API key
+
+
+HGEOTLS {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ YES encrypts lookups.  Turned off automatically for IP-API.COM without
+ an API key, whose free service is plain HTTP only.
+} T Help: Use HTTPS
+
+
+HGEOTMO {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ Seconds to wait for the provider before giving up on a lookup.
+} T Help: Lookup timeout
+
+
+HGEORTY {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ Extra attempts after a lookup fails.
+} T Help: Retries on failure
+
+
+HGEOCACH {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ Remembers results so a caller who logs on again does not cost another
+ lookup.  TIME looks the address up again after Cache duration.
+} T Help: Cache
+
+
+HGEODUR {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ Minutes a remembered result is used before the address is looked up
+ again (44640 is 31 days).  Used only when Cache is TIME.
+} T Help: Cache duration
+
+
+HGEOLOG {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ How much is written to TOTALIPCONTROL\GEOIP LOGS: nothing, errors only,
+ each lookup, or each lookup plus cache use.
+} T Help: GeoIP log level
+
+
+HGEOMODE {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ COMBINED writes the whole location to City/state field.  SPLIT writes
+ the city and state there and the country to Country field.
+} T Help: Write mode
+
+
+HGEOFLD {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ The user account field for the location, or for city and state in
+ SPLIT mode.
+} T Help: City/state field
+
+
+HGEOCFLD {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ The user account field for the country, in SPLIT mode.
+} T Help: Country field
+
+
+HGEOCFMT {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ FULL writes the country's name, e.g. United States; CODE writes its
+ two-letter code, e.g. US.
+} T Help: Country format
+
+
+HGEORFMT {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ CODE writes a two-letter state code where one exists, e.g. MN; FULL
+ writes the name, e.g. Minnesota.
+} T Help: State format
+
+
+HGEOFMT {
+[1;37mN!SNTROWNUM. N!SNTROWNAME[0m
+ How the location is written.  Empty parts are dropped, so a caller
+ with no city still reads cleanly.
+ Allowed: N!SNTHINT
+} T Help: Location format
+

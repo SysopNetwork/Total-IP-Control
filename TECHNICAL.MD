@@ -6,13 +6,17 @@
 as a 32-bit Win32 DLL. It registers with the BBS module system and installs two
 hooks into the TCP/IP layer at startup:
 
-1. **`hdlcon` hook** — Intercepts every new telnet connection to mark the socket
-   for PROXY header processing, to apply connection-limit checks at connect
-   time, and to enforce the "require trusted proxy" policy before login.
+1. **`hdlcon` hook** — Intercepts every new connection, on every registered
+   daemon, to mark the socket for PROXY header processing, to apply
+   connection-limit checks at connect time, and to enforce the "require trusted
+   proxy" policy before login. The accepting daemon is identified by its
+   `svrinf` name, and each protocol's policy is applied independently.
 
-2. **`recv()` IAT patch** — Replaces the `recv()` entry in `GALTNTD.DLL`'s
-   Import Address Table so the PROXY header is consumed before GALTNTD reads
-   any application data, without polling or sleeping.
+2. **`recv()` IAT patch** — Replaces the `recv()` entry in the Import Address
+   Table of whichever module reads the socket, so the PROXY header is consumed
+   before any application data is seen, without polling or sleeping. Two modules
+   are patched: `GALTNTD.DLL` for telnet, and `ssh.dll` — the libssh library the
+   SSH Server module (`SNSSH`) hands its accepted sockets to — for SSH.
 
 It also starts a **background worker thread** and a once-per-second `rtkick()`
 routine for GeoIP location lookups (see *GeoIP Location* below), so blocking
@@ -32,21 +36,21 @@ All features share one configuration record and one lifecycle.
 2. Initialize the audit-log `CRITICAL_SECTION` and clear the per-channel
    pending-socket table.
 3. `opnmsg("SNTIPCTL.MCV")` — open the compiled message file.
-4. Size the full-screen editor forms (`fsdroom`) and reserve per-user VDA space
-   (`dclvda`).
-5. Apply built-in defaults (all features off), then `cfg_load()` to read the
+4. Apply built-in defaults (all features off), then `cfg_load()` to read the
    saved settings record from `SNTIPCTL.DAT`.
-6. Create the audit-log directory tree if logging is enabled, and the
-   `GEOIP LOGS\` folder if GeoIP logging is enabled.
+5. (Log folders under `TOTALIPCONTROL\` are not created here: the log writer
+   creates a file's folders the first time it opens it.)
 7. Resolve `_tcpipinf` at runtime from `GALTCPIP.DLL` via `GetProcAddress`
    (avoids link-time ordinal dependencies).
 8. Save and replace `hdlcon`.
 9. Patch `recv()` in `GALTNTD.DLL`'s IAT (falls back to `GALTCPIP.DLL` if
    GALTNTD is unavailable, and to a single non-blocking check if no patch slot
-   is found).
+   is found), then patch `recv()` in `ssh.dll`'s IAT if that module is loaded.
+   The two patches are tracked independently: either can fail without affecting
+   the other.
 10. `geoip_start()` — create the GeoIP worker thread and its signalling events,
     and arm the once-per-second result-drain `rtkick()`.
-11. Register the `/TOTALIP` global command handler (`globalcmd`).
+11. Register the `/MYIP`, `/WHOSON` and `/TIP` global command handler (`globalcmd`).
 
 If `hdlcon` is NULL at init (because `GALTNTD` has not yet loaded), proxy
 detection cannot be installed and a fatal warning is logged.
@@ -61,38 +65,95 @@ and ordinal imports (matching the current slot value against the known
 `WS2_32!recv` address).
 
 `patch_iat_recv()` makes the IAT page writable with `VirtualProtect`, overwrites
-the slot with `prx_recv_hook`, and restores the original protection. The
-original address is saved in `real_recv` for pass-through and shutdown
-restoration. `SNTIPCTL`'s own `recv()` calls go through its own unpatched IAT,
-so there is no recursion.
+the slot with `prx_recv_hook`, and restores the original protection. Each patched
+slot is recorded in `iat_patches[]` alongside its original address, so
+`sntipctl_fin()` can restore every one of them at shutdown; a slot that is
+already hooked is never re-recorded, which keeps a repeat call from saving
+`prx_recv_hook` as the "original". `SNTIPCTL`'s own `recv()` calls go through its
+own unpatched IAT, so there is no recursion.
+
+`ssh.dll` imports `recv` **by ordinal** (WS2_32 ordinal 16), which is why
+`find_iat_recv()` must resolve ordinal imports by comparing the bound slot value
+against `WS2_32!recv` rather than by name. Because `ssh.dll` is a static import
+of `SNSSH.DLL`, it is already in the process by the time `SNTIPCTL` initializes,
+provided `SNSSH` precedes `SNTIPCTL` in `wgserv.cfg`.
+
+Two booleans, `tnt_recv_hooked` and `ssh_recv_hooked`, record which patches
+succeeded. They are tracked separately rather than inferred from `real_recv`:
+telnet must fall back to its `FIONREAD` path when only `ssh.dll` was hooked, and
+SSH header processing must stay off when only the telnet module was.
 
 ---
 
 ## Connection Handling (`sntipctl_hdlcon`)
 
-Called by GALTNTD for every new connection. In order:
+`hdlcon` is the BBS "handle connect" vector, reached for every new connection on
+every registered daemon. GALTNTD calls it for telnet; `SNSSH` reaches it through
+the `bbscon()` call in its `incall` routine. The accepting daemon is identified
+from `(*tcpipinf)[usrnum].server->name` (`"Telnet"` / `"SSH"`), and everything
+below is keyed off that. Rlogin, FTP and any other daemon are never blocked here.
 
-1. Record `(*tcpipinf)[usrnum].socket` in `pending_skt[usrnum]` so the recv hook
-   can process the PROXY header on first read.
-2. Call through to the original `hdlcon` (`hcsave`).
-3. **Require-trusted-proxy enforcement** (if enabled): the raw TCP peer IP — the
-   proxy's address for a relayed connection, or the client's own address for a
-   direct one — is checked against the trusted-proxy list. A connection that is
-   not from a trusted proxy is refused before login: the `PRXBLK` message is
-   written to the socket, the socket is closed, and the channel is released.
-   Loopback (`127.0.0.0/8`) and whitelisted addresses are always exempt, and an
-   empty trusted-proxy list disables blocking.
-4. **Connection-limit check** (non-proxy connections, where the real IP is
-   already known): if the per-IP limit is reached, the `CLIMIT` message is sent
-   and the connection is closed before the login prompt.
+In order:
+
+1. **Require-trusted-proxy enforcement** (if enabled for the connecting
+   protocol): the raw TCP peer IP — the proxy's address for a relayed
+   connection, or the client's own address for a direct one — is checked against
+   that protocol's trusted-proxy list. Loopback (`127.0.0.0/8`) and whitelisted
+   addresses are always exempt, and an empty trusted-proxy list disables blocking.
+   Refusal differs by protocol; see below.
+2. Record `(*tcpipinf)[usrnum].socket` in `pending_skt[usrnum]`, and the protocol
+   in `pending_proto[usrnum]`, so the recv hook can process the PROXY header on
+   first read. SSH is only registered when the Sysop enabled header processing
+   **and** `ssh.dll` was hooked.
+3. **Connection-limit check** — telnet only, and only for connections whose real
+   IP is already known at connect time (no pending PROXY header). If the per-IP
+   limit is reached, the `CLIMIT` message is sent and the connection is closed
+   before the login prompt. SSH and every other protocol are limited at logon
+   instead, via the `byenow()` path in `sntipctl_logon`.
+4. Call through to the original `hdlcon` (`hcsave`).
+
+### Refusing a connection
+
+The two protocols must be refused differently, because of **when** `hdlcon` runs
+relative to the daemon taking ownership of the socket.
+
+**Telnet** — refused at the door. `PRXBLK` is written straight to the socket,
+`closesocket()` is called, and `hdlcon` returns **without** calling `hcsave()`,
+so GALTNTD never activates the channel. Skipping `hcsave()` is essential: if
+GALTNTD claimed the channel first and the socket were then closed, both GALTNTD
+and GALTCPIP would still hold the now-closed handle and would try to flush the
+login banner to it on the next scheduler cycle — the cause of the audit-trail
+`TCP/IP ERROR ... SEND error 10038 (Socket operation on non-socket)` and the
+garbled bytes after the refusal message.
+
+**SSH** — refused with `shutdown(skt, SD_BOTH)`, and `hcsave()` **is** called.
+By the time `hdlcon` runs for an SSH channel, `SNSSH` has already passed the
+socket to libssh via `ssh_bind_accept_fd()`; `hdlcon` is reached from the
+`bbscon()` call that follows it. From that moment libssh owns the descriptor and
+closes it itself in `ssh_free()`. Calling `closesocket()` here — the telnet
+technique — would leave libssh to close a descriptor the OS may already have
+reused for an unrelated connection. `shutdown()` instead tears down the
+*connection* while leaving the descriptor valid and owned by libssh: the next
+read returns EOF, `SNSSH`'s key-exchange pump fails the session, and its normal
+teardown (`snssh_drop` → reap → `ssh_free` + `bbsdsc`) releases the channel and
+the socket exactly once. The channel must therefore be allowed to finish
+connecting, which is why `hcsave()` is still called.
+
+No refusal text is sent on SSH. Nothing has been negotiated at that point, so
+plaintext written now would land in the middle of the SSH version exchange and
+the client would report a protocol error rather than display it. The refusal is
+recorded in `DENIED CONNECTIONS` instead.
 
 ---
 
 ## PROXY Protocol v1 Parsing
 
-The recv hook (`prx_recv_hook`) fires on every `recv()` GALTNTD makes:
+The recv hook (`prx_recv_hook`) fires on every `recv()` made by a patched module
+— GALTNTD for telnet, libssh (`ssh.dll`) for SSH:
 
 - Peek reads (`MSG_PEEK`) are passed straight through.
+- A socket that `sntipctl_hdlcon` never registered is passed straight through.
+  This is what makes the hook inert when SSH header processing is switched off.
 - For a non-peek read on a pending socket, `prx_consume_header()` is called.
   It returns one of three results, and the hook acts accordingly:
   - **consumed** — a complete header was read (and applied, or discarded if the
@@ -101,12 +162,34 @@ The recv hook (`prx_recv_hook`) fires on every `recv()` GALTNTD makes:
   - **not a PROXY stream** — the pending flag is cleared and the read passes
     through untouched.
   - **incomplete** — the header is still arriving; the hook returns
-    `WSAEWOULDBLOCK` and leaves the pending flag set, so GALTNTD's non-blocking
-    event loop retries on the next readable event. No partial data is delivered.
+    `WSAEWOULDBLOCK` and leaves the pending flag set, so the daemon's
+    non-blocking event loop retries on the next readable event. No partial data
+    is delivered. GALTNTD retries directly; libssh turns the `WSAEWOULDBLOCK`
+    into `SSH_AGAIN`, which `SNSSH`'s key-exchange pump already treats as "need
+    more data" and re-drives on the next socket notification.
 
-This guarantees the entire header is consumed before GALTNTD reads any
+This guarantees the entire header is consumed before the daemon reads any
 application data, even when the header is split across TCP segments — preventing
-a half-consumed header from corrupting the input stream.
+a half-consumed header from corrupting the input stream (for telnet, garbled ANSI
+and dead arrow keys; for SSH, a broken version exchange).
+
+The socket is mapped back to its channel by `pending_unum_for()`, which matches
+**only** against the current channel (`pending_skt[usrnum] == s`). That is always
+correct here: `hdlsock()` calls `curusr(usrnum)` before invoking any socket event
+handler, and every libssh read is driven from `SNSSH`'s `sktnfy()` callback, which
+was registered with that same `usrnum`.
+
+This must not be "hardened" into a scan of `pending_skt[]` for the socket. A stale
+entry whose handle the OS has since recycled would then match a *different*
+channel, and the hook would consume bytes from a live session's stream and rewrite
+the wrong channel's IP. A missed match merely passes the read through untouched; a
+wrong match corrupts a connection.
+
+`prx_consume_header()` distinguishes "no data yet" from "connection gone": a peek
+returning 0 (EOF), or failing with anything other than `WSAEWOULDBLOCK`, reports
+*not a PROXY stream* so the daemon reads the EOF/error and tears the channel down.
+Reporting "wait" there would spin, since `select()` keeps calling a closed socket
+readable.
 
 `prx_consume_header()` logic:
 
@@ -123,26 +206,63 @@ a half-consumed header from corrupting the input stream.
    `"PROXY TCP4 <src-ip> <dst-ip> <src-port> <dst-port>\r\n"` and the source IP
    (`inet_addr`) is written into `(*tcpipinf)[unum].inaddr`.
 
+Which trusted list and enforcement flag apply is chosen from
+`pending_proto[unum]`, so the telnet and SSH policies never share a list.
+
+When a connect-time Audit Trail line is emitted here, `conn_ip_logged[unum]` is
+set so `sntipctl_logon` does not write a second, redundant line for the same
+session. (Telnet is skipped from the logon trail line unconditionally, as it
+always has been; a *direct* SSH login — no header, nothing logged at connect —
+still produces its trail line.)
+
 Only `TCP4` (IPv4) headers are applied; other protocols pass through unchanged.
-If the IAT patch was unavailable, `sntipctl_hdlcon` performs a single
-non-blocking `FIONREAD` check as a best-effort fallback.
+If the telnet IAT patch was unavailable, `sntipctl_hdlcon` performs a single
+non-blocking `FIONREAD` check as a best-effort fallback. That fallback is never
+run for SSH: with no hook there is no SSH header support to fall back to, and a
+destructive read there would steal bytes from libssh.
 
 ---
 
 ## Trusted Proxy Enforcement
 
-Up to two trusted proxy entries are stored as `struct snt_cidr` (network address
-+ mask, both in network byte order). A bare IP is treated as `/32`; an all-zero
-entry is unused. `is_trusted_proxy(ip)` returns TRUE if `ip` matches any
-configured entry.
+Up to ten trusted proxy entries per protocol are stored as `struct snt_cidr`
+(network address + mask, both in network byte order; IPv4 only, since the BBS
+listens on IPv4 and the proxy's hop to it is always IPv4). A bare IP is treated as `/32`; an all-zero
+entry is unused. `cidr_list_match()` does the work; `is_trusted_proxy(ip)` and
+`is_ssh_trusted_proxy(ip)` apply it to the telnet and SSH lists respectively.
 
-Two independent switches use this list:
+Two independent switches use each list:
 
 - **Trusted proxy enforcement** — when on, PROXY headers are applied only when
   the connecting IP is trusted (anti-spoofing). The connection is still allowed.
 - **Require trusted proxy** — when on, connections not from a trusted proxy are
   refused at connect time (see Connection Handling). Both switches are no-ops
   when the trusted list is empty.
+
+### SSH policy
+
+The SSH policy is a parallel, fully independent copy of the telnet one: its own
+enable flags and its own trusted proxy CIDR list. The two protocols may be
+fronted by different proxies, and trusting a relay to assert client IPs for
+telnet must not implicitly trust it for SSH.
+
+| Variable | Meaning |
+|---|---|
+| `ssh_manage_enabled` | Master gate. Off ⇒ no SSH-specific policy at all |
+| `ssh_hdr_enabled` | Consume a PROXY v1 header on SSH and rewrite the channel IP |
+| `ssh_trust_enabled` | Only apply a consumed header from a trusted SSH proxy |
+| `ssh_block_enabled` | Refuse SSH not relayed by a trusted SSH proxy |
+| `ssh_proxy_cidrs[]` | The SSH trusted list (`ssh_proxy_count` non-empty entries) |
+
+`ssh_hdr_enabled` has no telnet counterpart because telnet header processing is
+unconditional. For SSH it must be opted into: the interception it requires
+reaches into libssh, and it only makes sense when the front end actually sends
+the header on the SSH port.
+
+Every SSH setting takes effect on the next connection, since all of them are read
+in `hdlcon`. The one exception is `ssh_hdr_enabled`, which additionally needs
+`ssh.dll` to have been hooked at init — `cfg_ssh_done()` logs a message telling
+the Sysop to restart if it is turned on while `ssh_recv_hooked` is false.
 
 ---
 
@@ -373,42 +493,65 @@ take the folder name as a parameter. All file I/O is serialized through a
 
 ## Online Configuration Editor
 
-The editor is opened with `/TOTALIP` from anywhere on the BBS; the `MASTER` key
-is required.
+The editor opens with `/TIP` from anywhere on the BBS, or from a menu item that
+runs the module with the command line `MENU=SYSOPMENU`; both need the `MASTER`
+flag (`ed_allowed`). It has two levels, like the Globals `=gset` menu: a list of
+six sections with their setting counts, then the chosen section's settings,
+numbered from 1.
 
-`sntipctl_gbl()` (a `globalcmd` handler) matches the command, verifies access,
-sets `usrptr->state = cfgstt` / `substt = CFGSTT_MENU`, suppresses the output
-pager for the whole session, and displays the top menu.
+`sntipctl_gbl()` (for `/TIP`) and `sntipctl_gateway()` (for a menu item whose
+command line has `MENU=SYSOPMENU`) both call `ed_open()`, which sets
+`usrptr->state = cfgstt` / `substt = ST_TOP`, turns page pausing off with
+`btuxnf(usrnum, 0, 19)`, and draws the section list. `sntipctl_stt()` (the
+`sttrou`) runs the menu entry when `substt == 0` and hands every other
+sub-state to `ed_entry()`:
 
-`sntipctl_stt()` (the `sttrou` state-input routine) drives the editor:
+- `ST_TOP` — the section list: a number opens that section; `H` is the quick
+  start; `X`/`Q` leaves (restoring the user's own paging with `rstrxf()` and
+  returning 0 via `condex()`).
+- `ST_SECT` — one section: a setting number opens it; `H n` is the help for
+  setting *n*; `X` goes back to the section list.
+- `ST_VALUE` — a new value for a free-form setting (blank keeps it, `?` helps).
+- `ST_CHOICE` — a list setting: a choice number or its name.
 
-- `substt == 0` — entered from a BBS menu item; runs the per-module gateway.
-- `CFGSTT_MENU` — top-level menu. `1`/`2`/`3`/`4` launch full-screen (FSE) forms;
-  `X`/`Q` restores the pager and exits via `condex()`.
+`MENU=` is parsed with the gateway's other keywords and takes precedence over
+`MODULE=`. Only `SYSOPMENU` is defined; any other value is refused with an
+Audit Trail warning, so the keyword can name more screens later.
 
-The four FSE forms are **General Settings**, **Trusted Proxy IP/CIDRs**
-(2 entries), **Connection Limit Whitelist** (10 entries), and **GeoIP Location**.
-All four share a uniform layout — the same header, the same `Action:` / error
-footer, and field markers aligned to a common column. Each form's done callback
-applies its fields to the live variables and persists them with `cfg_save()`.
+**The settings table.** `fields[]` holds all 150 settings in display order. It
+is built once at startup by `ed_build()`: each section's single settings come
+from a template (`gen_tmpl`, `tel_tmpl`, `geo_tmpl`, `ssh_tmpl`), and
+`ed_add_list()` adds one row per entry of an address list (10 trusted proxies
+per protocol, 50 + 50 whitelist entries). Each entry binds a label to the
+**live variable** it edits (`&conn_limit_enabled`,
+`&whitelist_cidrs[3]`, ...), with a type (`FT_YN`, `FT_NUM`, `FT_KEY`, `FT_STR`,
+`FT_SECRET`, `FT_CIDR`, `FT_CIDR6`, `FT_LIST`, `FT_CACHE`), a range or choice
+list, a hint, and its help message. A setting's number is its position in the
+table, grouped by section; `sections[]` gives each section's title, range and
+rows per page (the whitelists show 10 at a time, `N`/`P`), and a row's number
+is its position within its section. Yes/no and list settings may
+be bound to a `GBOOL` (a `short`) or an `INT`; `ed_getint`/`ed_setint` pick the
+width from the entry's `size` so neither is ever written as the other.
 
-Three interaction details:
+**Applying a change** (`ed_applyvalue`): parse and store (`ed_setfield`, which
+changes nothing if the value is refused), recompute derived state
+(`cfg_after_change`: proxy and whitelist counts, the two logging sinks, the
+GeoIP host/HTTPS rules), save (`cfg_save`, or `cfg6_save` for an IPv6 whitelist
+entry), and write an Audit Trail line `<userid> changed <section>: <setting>`.
 
-- **Pager suppression.** The editor sets `scnbrk` to the continuous-output
-  sentinel `CTNUOS` for the whole session (on `/TOTALIP` entry) and restores the
-  user's real screen length only on exit. Channel output is transmitted
-  asynchronously by the poll loop, so `cfg_show_topmenu()` — which draws the
-  header/banner/menu — keeps `scnbrk` pinned to `CTNUOS` while the editor owns
-  the pager (rather than restoring a value the FSD teardown may have left paged),
-  which is what prevents a `(N)onstop,Q,C?` prompt when the menu redraws after a
-  form closes.
-- **Menu redraw on form close.** Each form's done callback (`cfg_finish_form`)
-  redraws the top menu immediately, optionally with a one-line "settings saved"
-  banner printed *after* the screen-clearing header so it is not wiped (and does
-  not flash on a separate screen).
-- **Spurious input absorption** (`absorb_count`) swallows the empty/`/` input
-  the BBS delivers immediately after a global command or a full-screen form
-  closes, so a real keystroke is never lost and the menu is not redrawn twice.
+**Screen text** is all in `SNTIPCTL.MSG` (header, rows, prompts, a help message
+per setting), with the values supplied through text variables (`N!SNTSTATUS`,
+`N!SNTROWNAME`, `N!SNTROWVAL`, `N!SNTHINT`, ...). `ed_rownote()` adds a remark
+to a row whose setting cannot take effect right now, such as a block with no
+trusted proxy listed.
+
+**Spurious input absorption** (`absorb_count`) swallows the empty/`/` input the
+BBS delivers immediately after a global command returns 1, so the first screen
+is not drawn twice and no real keystroke is lost.
+
+`TESTS\RUNTESTS.CMD` builds `EDTEST.EXE`, which compiles the editor's table and
+value logic straight out of `SNTIPCTL.C` and checks every setting type against
+the variable it is bound to — no BBS needed.
 
 ---
 
@@ -416,39 +559,60 @@ Three interaction details:
 
 ### `SNTIPCTL.DAT` (Btrieve)
 
-Settings are stored in a single 512-byte Btrieve record keyed by `"SNTIPCTL"`,
-created automatically on first run via `dfaCreateSpec` (guarded by a
+Settings are stored in `SNTIPCTL.DAT`, a Btrieve file of fixed 512-byte
+records, each found by its 16-byte `recid` key:
+
+| Record | Holds |
+|---|---|
+| `SNTIPCTL` | Every single setting, plus the first 2 trusted proxies per protocol and the first 10 IPv4 whitelist entries |
+| `SNTPROXY` | The telnet and SSH trusted proxy lists, 10 each |
+| `SNTWL4` | The IPv4 whitelist, 50 entries |
+| `SNTIPV6WL` | The IPv6 whitelist, entries 1–25 (earlier builds wrote 10 here, at the same offset) |
+| `SNTIPV6W2` | The IPv6 whitelist, entries 26–50 |
+
+The list records let the lists grow without changing the main record. The main
+record still carries the leading entries it always had, written on every save,
+so an earlier build reading the file keeps them; on upgrade, a missing list
+record means the lists start from those entries and the record is written on
+the first save. Every record is asserted at compile time to be 512 bytes.
+
+The main record (`"SNTIPCTL"`) is created automatically on first run via `dfaCreateSpec` (guarded by a
 file-existence check to avoid a spurious create error on restart). The record
-carries a layout-version byte (currently **9**). A compile-time assertion keeps
+carries a layout-version byte (currently **13**). A compile-time assertion keeps
 `sizeof(struct sntipctlcfg)` pinned at 512 bytes as fields are added.
 
 The record holds: trusted-proxy enable flag and two CIDRs, require-trusted-proxy
-flag, connection-limit enable flag and maximum, audit-logging flag, profile-IP
+flag, connection-limit enable flag and maximum, audit-logging mode, profile-IP
 enable flag and field number, bypass key name, ten whitelist CIDRs, the GeoIP
 block (enable flag, city/state field number, provider, HTTPS flag, timeout,
 cache flag and duration, retry count, log level, host, key, and format
-template), and the version-9 write-mode block (split flag, country field number,
-country format).
+template), the version-9 write-mode block (split flag, country field number,
+country format), the state/region format byte, and the version-11 SSH block
+(manage, header, trust and block flags plus two SSH trusted proxy CIDRs).
 
 Each block was appended after the previous version's fields (carved from the old
 spare area), so an older record is a byte-compatible prefix of the current
-layout. `cfg_load()` therefore **migrates a version 7 or 8 record in place with
-all existing settings preserved** — it loads them, applies defaults only for the
-blocks that record lacked (the whole GeoIP block for v7; the write-mode block for
-both v7 and v8), and rewrites the record as version 9. A record from an
-incompatible older version is replaced with defaults. `cfg_save()` writes the
-record when an editor form is saved; changes are live immediately and persist
-across restarts.
+layout. Versions **9, 10 and 11 load directly**: bytes a record predates read as
+zero, and `cfg_struct_to_live()` maps them to the behavior that version had (a
+v9 `'Y'`/`'N'` audit byte migrates to `LOGM_BOTH`/`LOGM_OFF`; a zeroed v9/v10 SSH
+block reads as "SSH unmanaged"). A version **7 or 8** record is migrated in place
+**with all existing settings preserved** — it is loaded, defaults are applied only
+for the blocks that record lacked (the whole GeoIP block for v7; the write-mode
+block for both; the SSH block for both), and it is rewritten as version 11. A
+record from an incompatible older version is replaced with defaults. `cfg_save()`
+writes the record each time the editor changes a setting; changes are live immediately and
+persist across restarts.
 
 ### `SNTIPCTL.MCV` (read-only at runtime)
 
-Compiled from `SNTIPCTL.MSG` by the BBS message compiler (GCNF). It contains the
-display messages (`LEVEL6`) and the full-screen editor templates (`LEVEL99`),
-read via `opnmsg`/`rawmsg`/`prfmsg`. It holds no settings values.
+Compiled from `SNTIPCTL.MSG` by the BBS itself at startup. All messages sit in
+one `LEVEL6` block — the caller messages, `/MYIP` and `/WHOSON`, and every
+screen of the settings editor — so the Sysop can reword any of them in the
+BBS's message editor. It holds no settings values. Dynamic values are named text
+variables (`N!SNT...`), never positional `printf` arguments.
 
-The message **source** uses bare `[` for ANSI sequences (so it is safe to edit
-and render in design tools); the actual escape byte (`0x1B`) is injected at
-packaging time. See `BUILDING.MD`.
+`SRC\SNTIPCTL.MSG` is the deployable file itself: binary CP437 with real ESC
+bytes and CRLF line endings (`.gitattributes` keeps git from converting it).
 
 ---
 
@@ -459,7 +623,8 @@ packaging time. See `BUILDING.MD`.
 1. `geoip_stop()` — stops the result drain, signals and **joins** the GeoIP
    worker thread, and frees its events and critical section (done first, so the
    thread cannot run while the DLL unloads).
-2. Restores the original `recv()` address in the patched IAT slot.
+2. Restores the original `recv()` address in **every** patched IAT slot
+   (`iat_patches[]` — the telnet module and `ssh.dll`).
 3. Restores the original `hdlcon` pointer.
 4. Deletes the audit-log critical section.
 5. Closes the settings file and the message file.
@@ -471,12 +636,14 @@ packaging time. See `BUILDING.MD`.
 | File | Purpose |
 |---|---|
 | `SRC\SNTIPCTL.C` | All module logic |
-| `SRC\SNTIPCTL.H` | Message slot numbers, FSE field numbers, editor sub-state constants |
-| `SRC\DIST\SNTIPCTL.MSG` | Message source (display messages + FSE templates; bare `[`) |
-| `SRC\DIST\SNTIPCTL.MDF` | Module descriptor |
+| `SRC\SNTIPCTL.H` | Message numbers and setting value constants |
+| `SRC\SNTVER.H` | The version number (used by the C code and the `.RC`) |
+| `SRC\SNTIPCTL.MSG` | Message file (deployable as-is: ESC bytes, CRLF) |
+| `SRC\SNTIPCTL.MDF` | Module descriptor |
 | `SRC\SNTIPCTL_EXP.DEF` | Export definition for the `init__sntipctl` entry alias |
 | `SRC\SNTIPCTL.RC` | Windows version resource |
 | `SRC\SNTIPCTL.vcxproj` | Visual Studio 2022 project |
+| `TESTS\RUNTESTS.CMD` | Builds and runs the host-side settings-editor test |
 
 `SNTIPCTL.DAT` is created at runtime and is not part of the source tree.
 
